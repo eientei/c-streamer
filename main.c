@@ -1,9 +1,10 @@
 #include <uv.h>
 #include <stdlib.h>
-#include "rtmp.h"
-#include "buffer.h"
+#include "rtmp/rtmp.h"
+#include "util/buffer.h"
 
-static uv_async_t rtmp_latch;
+static uv_async_t *main_latch;
+static uv_async_t *rtmp_latch;
 static int stop = 0;
 
 uv_loop_t* create_loop() {
@@ -15,12 +16,12 @@ uv_loop_t* create_loop() {
 }
 
 void free_walker(uv_handle_t *handle, void *arg) {
-    uv_close(handle, 0);
+    uv_close(handle, arg);
 }
 
-void stop_loop(uv_loop_t *loop) {
+void stop_loop(uv_loop_t *loop, void *arg) {
     uv_stop(loop);
-    uv_walk(loop, free_walker, 0);
+    uv_walk(loop, free_walker, arg);
     do {
         uv_run(loop, UV_RUN_ONCE);
     } while (uv_loop_close(loop) != 0);
@@ -42,33 +43,38 @@ void on_new_rtmp_connection(uv_stream_t *stream, int status) {
 }
 
 void rtmp_entry(void *userp) {
+    rtmp_init();
     uv_loop_t *loop = create_loop();
     loop->data = malloc(sizeof(bufslab_t));
     bufslab_init(loop->data, 128, 16777216, 1);
 
-    uv_tcp_t server;
-    uv_tcp_init(loop, &server);
+    uv_tcp_t *server = malloc(sizeof(uv_tcp_t));
+    uv_tcp_init(loop, server);
 
     struct sockaddr_in addr;
     uv_ip4_addr("0.0.0.0", 1935, &addr);
-    uv_tcp_bind(&server, (const struct sockaddr *) &addr, 0);
-    int r = uv_listen((uv_stream_t *) &server, 16, on_new_rtmp_connection);
+    uv_tcp_bind(server, (const struct sockaddr *) &addr, 0);
+    int r = uv_listen((uv_stream_t *) server, 16, on_new_rtmp_connection);
     if (r) {
         fprintf(stderr, "Listen error: %s\n", uv_strerror(r));
-        goto rtmp_entry_free;
+        stop = 1;
     }
 
-    uv_async_init(loop, &rtmp_latch, 0);
+    uv_async_init(loop, rtmp_latch, 0);
 
     while (!stop) {
         uv_run(loop, UV_RUN_ONCE);
     }
 
-    rtmp_entry_free:
+    uv_async_send(main_latch);
+
+    rtmp_deinit();
+    bufslab_print(loop->data);
     bufslab_deinit(loop->data);
-    stop_loop(loop);
+    stop_loop(loop, free);
     free(loop->data);
     free(loop);
+    rtmp_latch = 0;
 }
 
 void sigint_handler(uv_signal_t *handler, int signum) {
@@ -76,20 +82,28 @@ void sigint_handler(uv_signal_t *handler, int signum) {
 }
 
 int main(int argc, char **argv) {
+    main_latch = calloc(1, sizeof(uv_async_t));
+    rtmp_latch = calloc(1, sizeof(uv_async_t));
+
     uv_signal_t sigint;
     uv_signal_init(uv_default_loop(), &sigint);
     uv_signal_start(&sigint, sigint_handler, SIGINT);
 
-    rtmp_init();
     uv_thread_t rtmp_thread;
     uv_thread_create(&rtmp_thread, rtmp_entry, 0);
+
+    uv_async_init(uv_default_loop(), main_latch, 0);
 
     while (!stop) {
         uv_run(uv_default_loop(), UV_RUN_ONCE);
     }
 
-    stop_loop(uv_default_loop());
-    uv_async_send(&rtmp_latch);
+    if (rtmp_latch) {
+        uv_async_send(rtmp_latch);
+    }
+
+    stop_loop(uv_default_loop(), 0);
     uv_thread_join(&rtmp_thread);
+    free(main_latch);
     return 0;
 }

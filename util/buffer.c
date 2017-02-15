@@ -114,6 +114,9 @@ void bufslab_ref(void *ptr) {
 }
 
 void bufslab_unref(void *ptr) {
+    if (!ptr) {
+        return;
+    }
     bufbase_t *base = buf2base(ptr);
     base->refcount -= 1;
     if (base->refcount == 0) {
@@ -138,5 +141,21 @@ void bufslab_release(void *ptr) {
 }
 
 void bufslab_print(bufslab_t *slab) {
-
+    int idx = 0;
+    printf("Slab usage stats:\n");
+    for (int p = slab->min; p <= slab->max; p <<= 1) {
+        bufpool_t *pool = &slab->pools[idx];
+        int release_count = 0;
+        int acquired_count = 0;
+        for (int i = 0; i < pool->size; i++) {
+            if (pool->released[i]) {
+                release_count++;
+            }
+            if (pool->acquired[i]) {
+                acquired_count++;
+            }
+        }
+        printf("capacity %10d, size = %d, released = %d, acquired = %d\n", pool->capacity, pool->size, release_count, acquired_count);
+        idx++;
+    }
 }
