@@ -6,6 +6,7 @@
 #include <string.h>
 #include <openssl/hmac.h>
 #include "rtmp/rtmp.h"
+#include "amf/amf.h"
 #include "util/buffer.h"
 
 static char SERVER_KEY[] = {
@@ -48,7 +49,7 @@ static uv_buf_t rtmp_alloc_buf(uv_handle_t *handle, size_t size) {
 }
 
 static void rtmp_read_alloc(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
-    suggested_size = 4096;
+    suggested_size = RTMP_BUFFER_SIZE;
     *buf = uv_buf_init(bufslab_acquire(handle->loop->data, (int) suggested_size), (unsigned int) suggested_size);
 }
 
@@ -128,6 +129,12 @@ static void rtmp_handshake_new(rtmp_context_t *context, char *digest) {
     uv_write(req, (uv_stream_t *) context->stream, &context->handshakebuf, 1, rtmp_write);
 }
 
+static void rtmp_handshake_old(rtmp_context_t *context) {
+    uv_write_t *req = malloc(sizeof(uv_write_t));
+    req->data = context->handshakebuf.base;
+    uv_write(req, (uv_stream_t *) context->stream, &context->handshakebuf, 1, rtmp_write);
+}
+
 static size_t rtmp_handshake_1(rtmp_context_t *context, size_t nread, const char *data) {
     size_t tocopy = 1536 - context->handshakebuf.len;
     if (tocopy > nread) {
@@ -135,7 +142,7 @@ static size_t rtmp_handshake_1(rtmp_context_t *context, size_t nread, const char
     }
 
     memmove(context->handshakebuf.base+context->handshakebuf.len, data, tocopy);
-    context->handshakebuf.len += nread;
+    context->handshakebuf.len += tocopy;
 
     if (context->handshakebuf.len != 1536) {
         return tocopy;
@@ -149,10 +156,224 @@ static size_t rtmp_handshake_1(rtmp_context_t *context, size_t nread, const char
     if (found) {
         rtmp_handshake_new(context, digest);
     } else {
-
+        rtmp_handshake_old(context);
     }
 
+    context->handshakebuf.len = 0;
+    context->state = RTMP_STATE_S2;
     return tocopy;
+}
+
+static size_t rtmp_handshake_2(rtmp_context_t *context, size_t nread, const char *data) {
+    size_t tocopy = 1536 - context->handshakebuf.len;
+    if (tocopy > nread) {
+        tocopy = nread;
+    }
+
+    context->handshakebuf.len += tocopy;
+
+    if (context->handshakebuf.len != 1536) {
+        return tocopy;
+    }
+
+    context->headerbuf = rtmp_alloc_buf(context->stream, RTMP_MAX_HEADER_SIZE);
+    context->headerbuf.len = 0;
+    context->messagebuf = rtmp_alloc_buf(context->stream, RTMP_MAX_MESSAGE_SIZE);
+    context->messagebuf.len = 0;
+    context->state = RTMP_STATE_HEADER;
+    return tocopy;
+}
+
+static void rtmp_free_chunk(void *data) {
+    rtmp_chunk_t *chunk = data;
+    bufslab_unref(chunk->buffer.base);
+    free(chunk);
+}
+
+static int rtmp_header(rtmp_context_t *context, size_t nread, const char *data) {
+    char *ptr = (char *) data;
+    char *tgt = context->headerbuf.base + context->headerbuf.len;
+    if (context->headerbuf.len == 0) {
+        *tgt++ = *ptr++;
+        context->headerbuf.len++;
+    }
+
+    int expectedlen;
+    switch (context->headerbuf.base[0] >> 6) {
+        case 0:
+            expectedlen = 11;
+            break;
+        case 1:
+            expectedlen = 7;
+            break;
+        case 2:
+            expectedlen = 3;
+            break;
+        default:
+        case 3:
+            expectedlen = 0;
+            break;
+    }
+
+    int chunkid = context->headerbuf.base[0] & 0x3F;
+
+    if (chunkid < 2) {
+        if (context->headerbuf.len == 1) {
+            *tgt++ = *ptr++;
+            context->headerbuf.len++;
+            if (data + nread <= ptr) {
+                return (int) (ptr - data);
+            }
+        }
+
+        if (context->headerbuf.len == 2 && chunkid == 1) {
+            *tgt++ = *ptr++;
+            context->headerbuf.len++;
+            if (data + nread <= ptr) {
+                return (int) (ptr - data);
+            }
+        }
+    }
+
+    int offset = 1;
+    if (chunkid == 0) {
+        chunkid = 64 + context->headerbuf.base[1];
+        offset = 2;
+    } else if (chunkid == 1) {
+        chunkid = 64 + context->headerbuf.base[1] * 256 + context->headerbuf.base[2];
+        offset = 3;
+    }
+
+    size_t left = 0;
+    size_t avail = nread - (ptr - data);
+
+    if (context->headerbuf.len < offset+expectedlen) {
+        left = expectedlen - (context->headerbuf.len-offset);
+        if (left > avail) {
+            left = avail;
+        }
+        memmove(tgt, ptr, left);
+        tgt += left;
+        ptr += left;
+        context->headerbuf.len += left;
+
+        if (context->headerbuf.len < offset+expectedlen) {
+            return (int) (ptr - data);
+        }
+    }
+
+    rtmp_chunk_t *chunk = 0;
+
+    for (int i = 0; i < context->chunks.size; i++) {
+        rtmp_chunk_t *chunkcand = context->chunks.nodes[i].data;
+        if (chunkcand->chunkid == chunkid) {
+            chunk = chunkcand;
+            break;
+        }
+    }
+
+    if (chunk == 0) {
+        chunk = malloc(sizeof(rtmp_chunk_t));
+        chunk->chunkid = chunkid;
+        chunk->buffer = rtmp_alloc_buf(context->stream, 65536);
+        arraylist_add(&context->chunks, chunk, rtmp_free_chunk);
+    }
+
+    context->header = chunk;
+
+    switch (context->headerbuf.base[0] >> 6) {
+        case 0:
+            chunk->stream = 0;
+            memmove(&chunk->stream, context->headerbuf.base+offset+7, 4);
+        case 1:
+            chunk->type = RTMP_MESSAGE_TYPE_0;
+            memmove(&chunk->type, context->headerbuf.base+offset+6, 1);
+            chunk->length = 0;
+            char *len = (char *) &chunk->length;
+            len[0] = context->headerbuf.base[offset+3+2];
+            len[1] = context->headerbuf.base[offset+3+1];
+            len[2] = context->headerbuf.base[offset+3];
+        case 2:
+            chunk->timestamp = 0;
+            memmove(&chunk->timestamp, context->headerbuf.base+offset, 3);
+        default:
+        case 3:
+            if (chunk->timestamp == 0xFFFFFF) {
+                memmove(&chunk, context->headerbuf.base+offset, 4);
+            }
+            break;
+    }
+
+    if (chunk->length > RTMP_MAX_MESSAGE_SIZE) {
+        fprintf(stderr, "[%p] Maximum message size exceeded, suggested: %d, max: %d\n", context, chunk->length, RTMP_MAX_MESSAGE_SIZE);
+        rtmp_disconnect(context->stream);
+    }
+
+    context->state = RTMP_STATE_BODY;
+    return (int) (ptr - data);
+}
+
+static void rtmp_message(rtmp_context_t *context, rtmp_chunk_t *header) {
+    amf_array_t amf;
+    printf("[%p] %s recceived\n", context, rtmp_message_type_names[header->type]);
+    switch (header->type) {
+        case RTMP_MESSAGE_TYPE_SET_CHUNK_SIZE:
+            break;
+        case RTMP_MESSAGE_TYPE_ABORT:
+            break;
+        case RTMP_MESSAGE_TYPE_ACKNOWLEDGEMENT:
+            break;
+        case RTMP_MESSAGE_TYPE_USER_CONTROL:
+            break;
+        case RTMP_MESSAGE_TYPE_WINDOW_ACKNOWLEDGEMENT_SIZE:
+            break;
+        case RTMP_MESSAGE_TYPE_SET_PEER_BANDWIDTH:
+            break;
+        case RTMP_MESSAGE_TYPE_AUDIO:
+            break;
+        case RTMP_MESSAGE_TYPE_VIDEO:
+            break;
+        case RTMP_MESSAGE_TYPE_AMF3_META:
+        case RTMP_MESSAGE_TYPE_AMF0_META:
+            break;
+        case RTMP_MESSAGE_TYPE_AMF3_CMD:
+        case RTMP_MESSAGE_TYPE_AMF3_CMD_ALT:
+        case RTMP_MESSAGE_TYPE_AMF0_CMD:
+            amf_array_decode(&amf, context->messagebuf.base, context->messagebuf.len);
+            amf_array_free(&amf);
+            break;
+        default:
+            rtmp_disconnect(context->stream);
+            break;
+    }
+}
+
+static int rtmp_body(rtmp_context_t *context, size_t nread, const char *data) {
+    rtmp_chunk_t *header = context->header;
+    size_t left = header->length - context->messagebuf.len;
+    if (left > context->inchunk) {
+        left = context->inchunk;
+    }
+
+    if (left > nread) {
+        left = nread;
+    }
+
+    memmove(context->messagebuf.base + context->messagebuf.len, data, left);
+    context->messagebuf.len += left;
+
+    if (context->messagebuf.len == header->length) {
+        rtmp_message(context, header);
+        context->messagebuf.len = 0;
+        context->headerbuf.len = 0;
+        context->state = RTMP_STATE_HEADER;
+    }
+
+    if (context->messagebuf.len % context->inchunk == 0) {
+        context->headerbuf.len = 0;
+        context->state = RTMP_STATE_HEADER;
+    }
+    return (int) left;
 }
 
 static void rtmp_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
@@ -162,6 +383,7 @@ static void rtmp_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
         rtmp_context_t *context = stream->data;
         size_t processed = 0;
         while (processed < nread) {
+            rtmp_state oldstate = context->state;
             size_t oldprocessed = processed;
             switch (context->state) {
                 case RTMP_STATE_S0:
@@ -171,14 +393,20 @@ static void rtmp_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
                     processed += rtmp_handshake_1(context, (size_t) (nread - processed), buf->base + processed);
                     break;
                 case RTMP_STATE_S2:
+                    processed += rtmp_handshake_2(context, (size_t) (nread - processed), buf->base + processed);
                     break;
                 case RTMP_STATE_HEADER:
+                    processed += rtmp_header(context, (size_t) (nread - processed), buf->base + processed);
                     break;
                 case RTMP_STATE_BODY:
+                    processed += rtmp_body(context, (size_t) (nread - processed), buf->base + processed);
                     break;
             }
             if (oldprocessed == processed) {
                 fprintf(stderr, "[%p] %d bytes not processed, being skipped\n", context, (int) (nread - processed));
+                if (oldstate == context->state) {
+                    rtmp_disconnect(context->stream);
+                }
                 break;
             }
         }
@@ -196,6 +424,8 @@ static rtmp_context_t* rtmp_create_context(uv_stream_t *stream) {
     context->stream = (uv_handle_t *) stream;
     context->handshakebuf = rtmp_alloc_buf((uv_handle_t *) stream, 1536);
     context->handshakebuf.len = 0;
+    context->headerbuf.base = 0;
+    context->messagebuf.base = 0;
     return context;
 }
 
@@ -203,6 +433,8 @@ static void rtmp_free_context(void *data) {
     rtmp_context_t *context = data;
     arraylist_deinit(&context->chunks);
     bufslab_unref(context->handshakebuf.base);
+    bufslab_unref(context->headerbuf.base);
+    bufslab_unref(context->messagebuf.base);
     free(context);
 }
 

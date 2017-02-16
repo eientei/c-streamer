@@ -140,9 +140,9 @@ void bufslab_release(void *ptr) {
     }
 }
 
-void bufslab_print(bufslab_t *slab) {
+void bufslab_print(bufslab_t *slab, char *header) {
     int idx = 0;
-    printf("Slab usage stats:\n");
+    printf(header);
     for (int p = slab->min; p <= slab->max; p <<= 1) {
         bufpool_t *pool = &slab->pools[idx];
         int release_count = 0;

@@ -66,10 +66,8 @@ void rtmp_entry(void *userp) {
         uv_run(loop, UV_RUN_ONCE);
     }
 
-    uv_async_send(main_latch);
-
     rtmp_deinit();
-    bufslab_print(loop->data);
+    bufslab_print(loop->data, "RTMP slab usage stats:\n");
     bufslab_deinit(loop->data);
     stop_loop(loop, free);
     free(loop->data);
@@ -105,5 +103,7 @@ int main(int argc, char **argv) {
     stop_loop(uv_default_loop(), 0);
     uv_thread_join(&rtmp_thread);
     free(main_latch);
+
+    fprintf(stderr, "We are not working any more, shoo!\n");
     return 0;
 }

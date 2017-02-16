@@ -85,7 +85,8 @@ void bufslab_unref(void *ptr);
  * Prints a stats for specified slab
  *
  * @param slab slab to print stats of
+ * @param header header of stats message
  */
-void bufslab_print(bufslab_t *slab);
+void bufslab_print(bufslab_t *slab, char *header);
 
 #endif //VIDEO_BUFFER_H

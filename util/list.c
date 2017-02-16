@@ -50,33 +50,3 @@ void arraylist_rem(arraylist_t *list, void *data) {
     list->size--;
     list->nodes[idx] = list->nodes[list->size];
 }
-
-void *arraylist_get(arraylist_t *list, int idx) {
-    return list->nodes[idx].data;
-}
-
-int arraylist_indexof(arraylist_t *list, void *data) {
-    for (int i = 0; i < list->size; i++) {
-        if (list->nodes[i].data == data) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-void arraylist_walk(arraylist_t *list, walk_cb walker, void *data) {
-    for (int i = 0; i < list->size; i++) {
-        arrayaction action = walker(list->nodes[i].data, data);
-        switch (action) {
-            case ARRAY_ACTION_CONTINUE:
-                break;
-            case ARRAY_ACTION_DELETE:
-                arraylist_rem(list, list->nodes[i].data);
-                i--;
-                break;
-            case ARRAY_ACTION_STOP:
-                i = list->size;
-                break;
-        }
-    };
-};
