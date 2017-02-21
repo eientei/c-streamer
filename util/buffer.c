@@ -1,161 +1,118 @@
 //
-// Created by user on 2/12/17.
+// Created by user on 2/17/17.
 //
 
-#include <string.h>
-#include <stdio.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "buffer.h"
 
-static void bufslab_buf_init(bufpool_t *pool, bufbase_t *buf) {
-    buf->capacity = pool->capacity;
-    buf->pool = pool;
+static void video_pool_free(void *ptr) {
+    video_pool_t *pool = ptr;
+    video_list_deinit(&pool->buffers);
+    free(pool);
 }
 
-static void bufslab_buf_deinit(void *ptr) {
-    free(buf2base(ptr));
+static void video_buffer_free(void *ptr) {
+    video_buffer_t *buffer = ptr;
+    buffer->pool = 0;
+    free(buffer);
 }
 
-static void bufslab_pool_init(bufpool_t *pool, int size, int capacity, bufslab_t *slab) {
-    pool->size = size;
-    pool->slab = slab;
-    pool->capacity = capacity;
-    pool->acquired = calloc((size_t) size, sizeof(void*));
-    pool->released = calloc((size_t) size, sizeof(void*));
-}
-
-static void bufslab_pool_deinit(bufpool_t *pool) {
-    for (int i = 0; i < pool->size; i++) {
-        if (pool->released[i]) {
-            free(buf2base(pool->released[i]));
-        }
-        if (pool->acquired[i]) {
-            fprintf(stderr, "Unreleased buffer %d in pool (%d) %p of slab %p\n", i, pool->capacity, pool, pool->slab);
-        }
-    }
-    free(pool->acquired);
-    free(pool->released);
-}
-
-static void bufslab_pool_grow(bufpool_t *pool) {
-    pool->size <<= 1;
-    pool->released = realloc(pool->released, sizeof(void*) * pool->size);
-    pool->acquired = realloc(pool->acquired, sizeof(void*) * pool->size);
-    for (int i = pool->size >> 1; i < pool->size; i++) {
-        pool->released[i] = 0;
-        pool->acquired[i] = 0;
-    }
-}
-
-void bufslab_init(bufslab_t *slab, int min, int max, int size) {
+void video_slab_init(video_slab_t *slab, size_t min, size_t max, size_t presize) {
     slab->min = min;
     slab->max = max;
+    video_list_init(&slab->pools);
+    for (size_t i = min; i <= max; i <<= 1) {
+        video_pool_t *pool = calloc(1, sizeof(video_pool_t));
+        pool->bufsiz = i;
+        video_list_init(&pool->buffers);
+        video_list_add(&slab->pools, pool, video_pool_free);
 
-    int count = 1;
-    for (int p = min; p < max; p <<= 1) {
-        count++;
-    }
-    slab->pools = malloc(sizeof(bufpool_t) * count);
-
-    count = 0;
-    for (int p = min; p <= max; p <<= 1) {
-        bufslab_pool_init(&slab->pools[count], size, p, slab);
-        count++;
+        for (size_t n = 0; n < presize; n++) {
+            video_buffer_t *buffer = calloc(1, sizeof(video_buffer_t) + i);
+            buffer->pool = pool;
+            buffer->refcount = 0;
+            video_list_add(&pool->buffers, buffer, video_buffer_free);
+        }
     }
 }
 
-void bufslab_deinit(bufslab_t *slab) {
-    int count = 0;
-    for (int i = slab->min; i <= slab->max; i <<= 1) {
-        bufslab_pool_deinit(&slab->pools[count]);
-        count++;
+void video_slab_deinit(video_slab_t *slab) {
+    for (size_t i = 0; i < slab->pools.size; i++) {
+        video_pool_t *pool = slab->pools.nodes[i].data;
+        for (size_t n = 0; n < pool->buffers.size; n++) {
+            video_buffer_t *buffer = pool->buffers.nodes[n].data;
+            if (buffer->refcount > 0) {
+                printf("Unreleased buffer %ld in pool (%ld) %p of slab %p\n", i, pool->bufsiz, pool, slab);
+            }
+        }
     }
-    free(slab->pools);
+    video_list_deinit(&slab->pools);
 }
 
-void *bufslab_acquire(bufslab_t *slab, int size) {
-    if (size > slab->max) {
-        fprintf(stderr, "Requested too big buffer, maximum capacity: %d, requested: %d\n", slab->max, size);
+void *video_slab_alloc(video_slab_t *slab, size_t size) {
+    size_t cap = slab->min;
+    size_t idx = 0;
+    while (cap < size) {
+        cap <<= 1;
+        idx++;
+    }
+
+    if (cap > slab->max) {
+        printf("Requested size %ld exceeds limit of %ld\n", size, slab->max);
         return 0;
     }
 
-    int count = 0;
-    for (int i = slab->min; i < size; i <<= 1) {
-        count++;
-    }
-
-    bufpool_t *pool = &slab->pools[count];
-    for (int i = 0; i < pool->size; i++) {
-        if (pool->released[i]) {
-            for (int n = 0; n < pool->size; n++) {
-                if (!pool->acquired[n]) {
-                    pool->acquired[n] = pool->released[i];;
-                    pool->released[i] = 0;
-                    buf2base(pool->acquired[i])->refcount = 1;
-                    return pool->acquired[i];
-                }
-            }
+    video_pool_t *pool = slab->pools.nodes[idx].data;
+    for (size_t i = 0; i < pool->buffers.size; i++) {
+        video_buffer_t *buffer = pool->buffers.nodes[i].data;
+        if (buffer->refcount == 0) {
+            buffer->refcount = 1;
+            return (char*)buffer + sizeof(video_buffer_t);
         }
     }
-    for (int i = 0; i < pool->size; i++) {
-        if (!pool->acquired[i]) {
-            pool->acquired[i] = base2buf(malloc(sizeof(bufbase_t) + pool->capacity));
-            bufslab_buf_init(pool, buf2base(pool->acquired[i]));
-            buf2base(pool->acquired[i])->refcount = 1;
-            return pool->acquired[i];
-        }
-    }
-    bufslab_pool_grow(pool);
-    return bufslab_acquire(slab, size);
+
+    video_buffer_t *buffer = calloc(1, sizeof(video_buffer_t) + cap);
+    buffer->pool = pool;
+    buffer->refcount = 1;
+    video_list_add(&pool->buffers, buffer, video_buffer_free);
+
+    return (char*)buffer + sizeof(video_buffer_t);
 }
 
-void bufslab_ref(void *ptr) {
-    buf2base(ptr)->refcount += 1;
+void video_slab_ref(void *ptr) {
+    video_buffer_t *buffer = (video_buffer_t *) ((char *) ptr - sizeof(video_buffer_t));
+    buffer->refcount++;
 }
 
-void bufslab_unref(void *ptr) {
-    if (!ptr) {
+void video_slab_unref(void *ptr) {
+    if (ptr == 0) {
         return;
     }
-    bufbase_t *base = buf2base(ptr);
-    base->refcount -= 1;
-    if (base->refcount == 0) {
-        bufslab_release(ptr);
+
+    video_buffer_t *buffer = (video_buffer_t *) ((char *) ptr - sizeof(video_buffer_t));
+    if (buffer->refcount == 0) {
+        printf("Requested freeing already unreferenced buffer %p (%ld)\n", ptr, buffer->pool->bufsiz);
+        return;
     }
+
+    buffer->refcount--;
 }
 
-void bufslab_release(void *ptr) {
-    bufbase_t *base = buf2base(ptr);
-    bufpool_t *pool = base->pool;
-    for (int i = 0; i < pool->size; i++) {
-        if (pool->acquired[i] == ptr) {
-            for (int n = 0; n < pool->size; n++) {
-                if (!pool->released[n]) {
-                    pool->released[n] = pool->acquired[i];
-                    pool->acquired[i] = 0;
-                    return;
-                }
+void video_slab_stats(video_slab_t *slab, char *header) {
+    printf("%s slab stats\n", header);
+    for (size_t i = 0; i < slab->pools.size; i++) {
+        size_t alloc = 0;
+        size_t free = 0;
+        video_pool_t *pool = slab->pools.nodes[i].data;
+        for (size_t n = 0; n < pool->buffers.size; n++) {
+            video_buffer_t *buffer = pool->buffers.nodes[n].data;
+            if (buffer->refcount) {
+                alloc++;
+            } else {
+                free++;
             }
         }
+        printf("buffsiz %10ld, size = %ld, free = %ld, acquire = %ld\n", pool->bufsiz, pool->buffers.size, free, alloc);
     }
-}
-
-void bufslab_print(bufslab_t *slab, char *header) {
-    int idx = 0;
-    printf(header);
-    for (int p = slab->min; p <= slab->max; p <<= 1) {
-        bufpool_t *pool = &slab->pools[idx];
-        int release_count = 0;
-        int acquired_count = 0;
-        for (int i = 0; i < pool->size; i++) {
-            if (pool->released[i]) {
-                release_count++;
-            }
-            if (pool->acquired[i]) {
-                acquired_count++;
-            }
-        }
-        printf("capacity %10d, size = %d, released = %d, acquired = %d\n", pool->capacity, pool->size, release_count, acquired_count);
-        idx++;
-    }
-}
+};

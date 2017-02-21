@@ -1,8 +1,9 @@
-#include <uv.h>
-#include <stdlib.h>
-#include "rtmp/rtmp.h"
-#include "util/buffer.h"
+//#include <uv.h>
+//#include <stdlib.h>
+//#include "rtmp/rtmp.h"
+//#include "util/buffer.h"
 
+/*
 static uv_async_t *main_latch;
 static uv_async_t *rtmp_latch;
 static int stop = 0;
@@ -42,11 +43,15 @@ void on_new_rtmp_connection(uv_stream_t *stream, int status) {
     }
 }
 
+void usr1_handler(uv_signal_t *handler, int signum) {
+    bufslab_print(handler->loop->data, "RTMP slab usage stats:\n");
+}
+
 void rtmp_entry(void *userp) {
     rtmp_init();
     uv_loop_t *loop = create_loop();
     loop->data = malloc(sizeof(bufslab_t));
-    bufslab_init(loop->data, 128, 16777216, 1);
+    bufslab_init(loop->data, 16, RTMP_MAX_MESSAGE_SIZE, 1);
 
     uv_tcp_t *server = malloc(sizeof(uv_tcp_t));
     uv_tcp_init(loop, server);
@@ -61,6 +66,10 @@ void rtmp_entry(void *userp) {
     }
 
     uv_async_init(loop, rtmp_latch, 0);
+
+    uv_signal_t *usr1 = malloc(sizeof(uv_signal_t));
+    uv_signal_init(loop, usr1);
+    uv_signal_start(usr1, usr1_handler, SIGUSR1);
 
     while (!stop) {
         uv_run(loop, UV_RUN_ONCE);
@@ -105,5 +114,54 @@ int main(int argc, char **argv) {
     free(main_latch);
 
     fprintf(stderr, "We are not working any more, shoo!\n");
+    return 0;
+}
+*/
+
+#include "global/global.h"
+
+void video_main_async(video_thread_t *thread, video_async_t *async) {
+    switch (async->type) {
+        case VIDEO_ASYNC_TYPE_NOOP:
+            break;
+        case VIDEO_ASYNC_TYPE_STOP:
+            uv_close((uv_handle_t *) &thread->global->sigint, 0);
+            uv_close((uv_handle_t *) &thread->global->sigusr, 0);
+            break;
+        case VIDEO_ASYNC_TYPE_STAT:
+            break;
+    }
+}
+
+void video_main_sigint(uv_signal_t *handle, int signal) {
+    video_thread_t *thread = handle->loop->data;
+    video_make_async(&thread->global->rtmp.latch, VIDEO_ASYNC_TYPE_STOP, 0, 0);
+    video_make_async(&thread->global->mp4.latch, VIDEO_ASYNC_TYPE_STOP, 0, 0);
+    video_make_async(&thread->global->main.latch, VIDEO_ASYNC_TYPE_STOP, 0, 0);
+}
+
+void video_main_sigusr(uv_signal_t *handle, int signal) {
+    video_thread_t *thread = handle->loop->data;
+    video_make_async(&thread->global->rtmp.latch, VIDEO_ASYNC_TYPE_STAT, 0, 0);
+    video_make_async(&thread->global->mp4.latch, VIDEO_ASYNC_TYPE_STAT, 0, 0);
+}
+
+int main(int argc, char **argv) {
+    video_global_t global;
+    video_global_init(&global);
+
+    uv_signal_init(uv_default_loop(), &global.sigint);
+    uv_signal_start(&global.sigint, video_main_sigint, SIGINT);
+
+    uv_signal_init(uv_default_loop(), &global.sigusr);
+    uv_signal_start(&global.sigusr, video_main_sigusr, SIGUSR1);
+
+    uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+
+    video_global_deinit(&global);
+
+    while (uv_loop_close(uv_default_loop()) != 0) {
+        uv_run(uv_default_loop(), UV_RUN_ONCE);
+    }
     return 0;
 }

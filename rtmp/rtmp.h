@@ -1,42 +1,47 @@
 //
-// Created by user on 2/12/17.
+// Created by user on 2/18/17.
 //
 
 #ifndef VIDEO_RTMP_H
 #define VIDEO_RTMP_H
 
 #include <uv.h>
-#include "util/list.h"
+#include "global/global.h"
 
-#define RTMP_MAX_HEADER_SIZE 128
-#define RTMP_MAX_MESSAGE_SIZE 65536
-#define RTMP_BUFFER_SIZE 2048
+#define VIDEO_RTMP_MESSAGE_MAX 1048576
 
-typedef enum rtmp_message_type_e rtmp_message_type;
-enum rtmp_message_type_e {
-    RTMP_MESSAGE_TYPE_0,
-    RTMP_MESSAGE_TYPE_SET_CHUNK_SIZE,
-    RTMP_MESSAGE_TYPE_ABORT,
-    RTMP_MESSAGE_TYPE_ACKNOWLEDGEMENT,
-    RTMP_MESSAGE_TYPE_USER_CONTROL,
-    RTMP_MESSAGE_TYPE_WINDOW_ACKNOWLEDGEMENT_SIZE,
-    RTMP_MESSAGE_TYPE_SET_PEER_BANDWIDTH,
-    RTMP_MESSAGE_TYPE_7,
-    RTMP_MESSAGE_TYPE_AUDIO,
-    RTMP_MESSAGE_TYPE_VIDEO,
-    RTMP_MESSAGE_TYPE_10,
-    RTMP_MESSAGE_TYPE_AMF3_CMD_ALT,
-    RTMP_MESSAGE_TYPE_12,
-    RTMP_MESSAGE_TYPE_13,
-    RTMP_MESSAGE_TYPE_14,
-    RTMP_MESSAGE_TYPE_AMF3_META,
-    RTMP_MESSAGE_TYPE_16,
-    RTMP_MESSAGE_TYPE_AMF3_CMD,
-    RTMP_MESSAGE_TYPE_AMF0_META,
-    RTMP_MESSAGE_TYPE_19,
-    RTMP_MESSAGE_TYPE_AMF0_CMD
+typedef struct video_rtmp_global_s video_rtmp_global_t;
+struct video_rtmp_global_s {
+    uv_tcp_t listener;
+
+    video_list_t clients;
 };
-static char *rtmp_message_type_names[] = {
+
+typedef enum video_rtmp_msgtype_e video_rtmp_msgtype;
+enum video_rtmp_msgtype_e {
+    VIDEO_RTMP_MSGTYPE_0,
+    VIDEO_RTMP_MSGTYPE_SET_CHUNK_SIZE,
+    VIDEO_RTMP_MSGTYPE_ABORT,
+    VIDEO_RTMP_MSGTYPE_ACKNOWLEDGEMENT,
+    VIDEO_RTMP_MSGTYPE_USER_CONTROL,
+    VIDEO_RTMP_MSGTYPE_WINDOW_ACKNOWLEDGEMENT_SIZE,
+    VIDEO_RTMP_MSGTYPE_SET_PEER_BANDWIDTH,
+    VIDEO_RTMP_MSGTYPE_7,
+    VIDEO_RTMP_MSGTYPE_AUDIO,
+    VIDEO_RTMP_MSGTYPE_VIDEO,
+    VIDEO_RTMP_MSGTYPE_10,
+    VIDEO_RTMP_MSGTYPE_AMF3_CMD_ALT,
+    VIDEO_RTMP_MSGTYPE_12,
+    VIDEO_RTMP_MSGTYPE_13,
+    VIDEO_RTMP_MSGTYPE_14,
+    VIDEO_RTMP_MSGTYPE_AMF3_META,
+    VIDEO_RTMP_MSGTYPE_16,
+    VIDEO_RTMP_MSGTYPE_AMF3_CMD,
+    VIDEO_RTMP_MSGTYPE_AMF0_META,
+    VIDEO_RTMP_MSGTYPE_19,
+    VIDEO_RTMP_MSGTYPE_AMF0_CMD
+};
+static char *video_rtmp_msgtype_names[] = {
         "UNKNOWN_MESSAGE_TYPE_0",
         "SET_CHUNK_SIZE",
         "ABORT",
@@ -60,70 +65,63 @@ static char *rtmp_message_type_names[] = {
         "AMF0_CMD"
 };
 
-typedef enum rtmp_state_e rtmp_state;
-enum rtmp_state_e {
-    RTMP_STATE_S0,
-    RTMP_STATE_S1,
-    RTMP_STATE_S2,
-    RTMP_STATE_HEADER,
-    RTMP_STATE_BODY
+typedef enum video_rtmp_state_e video_rtmp_state;
+enum video_rtmp_state_e {
+    VIDEO_RTMP_STATE_S0,
+    VIDEO_RTMP_STATE_S1,
+    VIDEO_RTMP_STATE_S2,
+    VIDEO_RTMP_STATE_HEADER,
+    VIDEO_RTMP_STATE_BODY
 };
 
-typedef enum rtmp_kind_e rtmp_kind;
-enum rtmp_kind_e {
-    RTMP_KIND_UNKNOWN,
-    RTMP_KIND_PUB,
-    RTMP_KIND_SUB
+typedef enum video_rtmp_kind_e video_rtmp_kind;
+enum video_rtmp_kind_e {
+    VIDEO_RTMP_KIND_UNDECIDED,
+    VIDEO_RTMP_KIND_PUBISHER,
+    VIDEO_RTMP_KIND_SUBSCRIBER
 };
 
-typedef struct rtmp_chunk_s rtmp_chunk_t;
-struct rtmp_chunk_s {
-    int chunkid;
+typedef struct video_rtmp_chunk_s video_rtmp_chunk_t;
+struct video_rtmp_chunk_s {
+    uint32_t chunkid;
 
-    int timestamp;
-    int length;
-    rtmp_message_type type;
-    int stream;
+    uint32_t timestamp;
+    uint32_t timediff;
+    uint32_t length;
+    video_rtmp_msgtype type;
+    uint32_t streamid;
 
-    uv_buf_t buffer;
+    uv_buf_t msgbodybuf;
 };
 
-typedef struct rtmp_context_s rtmp_context_t;
-struct rtmp_context_s {
-    uv_handle_t *stream;
-    rtmp_state state;
-    rtmp_kind kind;
+typedef struct video_rtmp_local_s video_rtmp_local_t;
+struct video_rtmp_local_s {
+    uv_tcp_t client;
+    video_rtmp_state state;
+    video_rtmp_kind kind;
 
-    arraylist_t chunks;
-    rtmp_chunk_t *header;
+    video_list_t chunks;
+    video_rtmp_chunk_t *header;
 
-    size_t inchunk;
-    size_t outchunk;
+    size_t inchunksiz;
+    size_t outchunksiz;
 
     uv_buf_t handshakebuf;
-    uv_buf_t headerbuf;
-    uv_buf_t messagebuf;
+    uv_buf_t msgheaderbuf;
 };
 
-typedef struct rtmp_channel_s rtmp_channel_t;
-struct rtmp_channel_s {
-    char *name;
+void video_rtmp_entry(video_thread_t *thread);
+void video_rtmp_async(video_thread_t *thread, video_async_t *async);
+void video_rtmp_exit(video_thread_t *thread);
 
-    rtmp_context_t *publisher;
+void video_rtmp_disconnect(video_rtmp_local_t *local);
+void *video_rtmp_alloc(video_rtmp_local_t *local, size_t size);
+void video_rtmp_write(video_rtmp_local_t *local, uv_buf_t *buf);
 
-    arraylist_t subscribers;
-};
-
-typedef struct rtmp_global_s rtmp_global_t;
-struct rtmp_global_s {
-    arraylist_t channels;
-    arraylist_t contexts;
-};
-
-void rtmp_init();
-void rtmp_connected(uv_stream_t* stream);
-void rtmp_disconnect(uv_handle_t *stream);
-void rtmp_disconnected(uv_handle_t* stream);
-void rtmp_deinit();
+char *video_rtmp_handshake_s0(video_rtmp_local_t *local, char *ptr, size_t len);
+char *video_rtmp_handshake_s1(video_rtmp_local_t *local, char *ptr, size_t len);
+char *video_rtmp_handshake_s2(video_rtmp_local_t *local, char *ptr, size_t len);
+char *video_rtmp_header(video_rtmp_local_t *local, char *ptr, size_t len);
+char *video_rtmp_body(video_rtmp_local_t *local, char *ptr, size_t len);
 
 #endif //VIDEO_RTMP_H

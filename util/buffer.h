@@ -1,92 +1,37 @@
 //
-// Created by user on 2/12/17.
+// Created by user on 2/17/17.
 //
 
 #ifndef VIDEO_BUFFER_H
 #define VIDEO_BUFFER_H
 
-typedef struct bufslab_s bufslab_t;
+#include "util/generic.h"
+#include "util/list.h"
 
-struct bufslab_s {
-    int min; ///< first power of two
-    int max; ///< last power of two
-    struct bufpool_s *pools; ///< pools for each power of two inbetween min..max
+typedef struct video_slab_s video_slab_t;
+struct video_slab_s {
+    size_t min;
+    size_t max;
+    video_list_t pools;
 };
 
-typedef struct bufpool_s bufpool_t;
-
-struct bufpool_s {
-    bufslab_t *slab; ///< parental slab
-    int capacity; ///< capacity of pooled buffers
-    int size; ///< total pool size, both for #released and #acquired
-    void **released; ///< allocated, but released buffers
-    void **acquired; ///< allocated buffers in use
+typedef struct video_pool_s video_pool_t;
+struct video_pool_s {
+    size_t bufsiz;
+    video_list_t buffers;
 };
 
-#define buf2base(ptr) ((bufbase_t*)(((char*)(ptr)) - sizeof(bufbase_t)))
-#define base2buf(ptr) ((void*)(((char*)(ptr)) + sizeof(bufbase_t)))
-
-typedef struct bufbase_s bufbase_t;
-
-struct bufbase_s {
-    bufpool_t *pool; ///< parent pool
-    int capacity; ///< capacity of the #data
-    int refcount; ///< reference count
+typedef struct video_buffer_s video_buffer_t;
+struct video_buffer_s {
+    video_pool_t *pool;
+    size_t refcount;
 };
 
-/**
- * Initalizes a slab
- *
- * @param slab slab to operate on
- * @param min first power of two
- * @param max last power of two
- * @param size pre-allocation factor
- */
-void bufslab_init(bufslab_t *slab, int min, int max, int size);
-
-/**
- * Deinitializes the slab
- *
- * @param slab slab to deinitialize
- */
-void bufslab_deinit(bufslab_t *slab);
-
-/**
- * Acquire a buffer of at least specified size
- *
- * @param slab slab to allocate on
- * @param size required buffer size
- * @return pointer to a bufer data
- */
-void *bufslab_acquire(bufslab_t *slab, int size);
-
-/**
- * Release a buffer acquired earlier
- *
- * @param ptr pointer to buffer returned by #bufslab_acquire
- */
-void bufslab_release(void *ptr);
-
-/**
- * Increment a reference-counter of a buffer
- *
- * @param ptr pointer to a buffer returned by #bufslab_acquire
- */
-void bufslab_ref(void *ptr);
-
-/**
- * Decrement a reference-counter of a buffer
- *
- * @param ptr pointer to a buffer returned by #bufslab_acquire
- */
-void bufslab_unref(void *ptr);
-
-/**
- * Prints a stats for specified slab
- *
- * @param slab slab to print stats of
- * @param header header of stats message
- */
-void bufslab_print(bufslab_t *slab, char *header);
+void video_slab_init(video_slab_t *slab, size_t min, size_t max, size_t presize);
+void video_slab_deinit(video_slab_t *slab);
+void *video_slab_alloc(video_slab_t *slab, size_t size);
+void video_slab_ref(void *ptr);
+void video_slab_unref(void *ptr);
+void video_slab_stats(video_slab_t *slab, char *header);
 
 #endif //VIDEO_BUFFER_H

@@ -1,14 +1,13 @@
 //
-// Created by user on 2/16/17.
+// Created by user on 2/17/17.
 //
 
-#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "map.h"
 
-static void amap_free_entry(void *ptr) {
-    amap_entry_t *entry = ptr;
+static void video_map_entry_free(void *ptr) {
+    video_map_entry_t *entry = ptr;
     if (entry->cb) {
         entry->cb(entry->value);
     }
@@ -16,47 +15,35 @@ static void amap_free_entry(void *ptr) {
     free(entry);
 }
 
-void amap_init(amap_t *map) {
-    arraylist_init(&map->entries);
+void video_map_init(video_map_t *map) {
+    video_list_init(map);
 }
 
-void amap_deinit(amap_t *map) {
-    arraylist_deinit(&map->entries);
+void video_map_deinit(video_map_t *map) {
+    video_list_deinit(map);
 }
 
-void amap_add(amap_t *map, char *key, void *value, free_cb cb) {
-    amap_entry_t *entry = 0;
-    for (int i = 0; i < map->entries.size; i++) {
-        entry = map->entries.nodes[i].data;
-        if (strcmp(key, entry->key) == 0) {
-            break;
-        }
-        entry = 0;
-    }
-
-    if (!entry) {
-        entry = malloc(sizeof(amap_entry_t));
-        arraylist_add(&map->entries, entry, amap_free_entry);
-    }
-
+void video_map_put(video_map_t *map, char *key, void *value, free_cb cb) {
+    video_map_entry_t *entry = calloc(1, sizeof(video_map_entry_t));
     entry->key = strdup(key);
-    entry->cb = cb;
     entry->value = value;
+    entry->cb = cb;
+    video_list_add(map, entry, video_map_entry_free);
 }
 
-void amap_rem(amap_t *map, char *key) {
-    for (int i = 0; i < map->entries.size; i++) {
-        amap_entry_t *entry = map->entries.nodes[i].data;
+void video_map_remove(video_map_t *map, char *key) {
+    for (size_t i = 0; i < map->size; i++) {
+        video_map_entry_t *entry = map->nodes[i].data;
         if (strcmp(key, entry->key) == 0) {
-            arraylist_rem(&map->entries, entry);
-            break;
+            video_map_entry_free(entry);
+            return;
         }
     }
 }
 
-void *amap_get(amap_t *map, char *key) {
-    for (int i = 0; i < map->entries.size; i++) {
-        amap_entry_t *entry = map->entries.nodes[i].data;
+void *video_map_get(video_map_t *map, char *key) {
+    for (size_t i = 0; i < map->size; i++) {
+        video_map_entry_t *entry = map->nodes[i].data;
         if (strcmp(key, entry->key) == 0) {
             return entry->value;
         }

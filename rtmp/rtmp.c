@@ -1,470 +1,170 @@
 //
-// Created by user on 2/12/17.
+// Created by user on 2/18/17.
 //
 
 #include <stdlib.h>
-#include <string.h>
-#include <openssl/hmac.h>
-#include "rtmp/rtmp.h"
-#include "amf/amf.h"
-#include "util/buffer.h"
+#include "rtmp.h"
 
-static char SERVER_KEY[] = {
-        'G', 'e', 'n', 'u', 'i', 'n', 'e', ' ', 'A', 'd', 'o', 'b', 'e', ' ',
-        'F', 'l', 'a', 's', 'h', ' ', 'M', 'e', 'd', 'i', 'a', ' ',
-        'S', 'e', 'r', 'v', 'e', 'r', ' ',
-        '0', '0', '1',
-        (char) 0xF0, (char) 0xEE, (char) 0xC2, (char) 0x4A, (char) 0x80, (char) 0x68,
-        (char) 0xBE, (char) 0xE8, (char) 0x2E, (char) 0x00, (char) 0xD0, (char) 0xD1,
-        (char) 0x02, (char) 0x9E, (char) 0x7E, (char) 0x57, (char) 0x6E, (char) 0xEC,
-        (char) 0x5D, (char) 0x2D, (char) 0x29, (char) 0x80, (char) 0x6F, (char) 0xAB,
-        (char) 0x93, (char) 0xB8, (char) 0xE6, (char) 0x36, (char) 0xCF, (char) 0xEB,
-        (char) 0x31, (char) 0xAE
+static void video_rtmp_local_init(video_rtmp_local_t *local);
+static void video_rtmp_local_deinit(video_rtmp_local_t *local);
+static void video_rtmp_allocbuf(uv_handle_t *handle, size_t size, uv_buf_t *buf);
+static void video_rtmp_readconn(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf);
+static void video_rtmp_newconn(uv_stream_t *client, int status);
+static void video_rtmp_remconn(uv_handle_t *handle);
+static void video_rtmp_writedone(uv_write_t *req, int status);
 
-};
-
-static char CLIENT_KEY[] = {
-        'G', 'e', 'n', 'u', 'i', 'n', 'e', ' ', 'A', 'd', 'o', 'b', 'e', ' ',
-        'F', 'l', 'a', 's', 'h', ' ', 'P', 'l', 'a', 'y', 'e', 'r', ' ',
-        '0', '0', '1',
-        (char) 0xF0, (char) 0xEE, (char) 0xC2, (char) 0x4A, (char) 0x80, (char) 0x68,
-        (char) 0xBE, (char) 0xE8, (char) 0x2E, (char) 0x00, (char) 0xD0, (char) 0xD1,
-        (char) 0x02, (char) 0x9E, (char) 0x7E, (char) 0x57, (char) 0x6E, (char) 0xEC,
-        (char) 0x5D, (char) 0x2D, (char) 0x29, (char) 0x80, (char) 0x6F, (char) 0xAB,
-        (char) 0x93, (char) 0xB8, (char) 0xE6, (char) 0x36, (char) 0xCF, (char) 0xEB,
-        (char) 0x31, (char) 0xAE
-};
-
-static char SERVER_KEY_TEXT[36];
-static char CLIENT_KEY_TEXT[30];
-
-static char SERVER_VERSION[] = {
-        (char) 0x0D, (char) 0x0E, (char) 0x0A, (char) 0x0D
-};
-
-static rtmp_global_t global;
-
-static uv_buf_t rtmp_alloc_buf(uv_handle_t *handle, size_t size) {
-    return uv_buf_init(bufslab_acquire(handle->loop->data, (int) size), (unsigned int) size);
+static void video_rtmp_local_init(video_rtmp_local_t *local) {
+    local->inchunksiz = 128;
+    local->outchunksiz = 128;
+    local->state = VIDEO_RTMP_STATE_S0;
+    local->kind = VIDEO_RTMP_KIND_UNDECIDED;
+    local->header = 0;
+    video_list_init(&local->chunks);
+    local->handshakebuf = uv_buf_init(video_rtmp_alloc(local, 2048), 0);
+    local->msgheaderbuf = uv_buf_init(video_rtmp_alloc(local, 128), 0);
 }
 
-static void rtmp_read_alloc(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
-    suggested_size = RTMP_BUFFER_SIZE;
-    *buf = uv_buf_init(bufslab_acquire(handle->loop->data, (int) suggested_size), (unsigned int) suggested_size);
+static void video_rtmp_local_deinit(video_rtmp_local_t *local) {
+    video_list_deinit(&local->chunks);
+    if (local->state == VIDEO_RTMP_STATE_S0 || local->state == VIDEO_RTMP_STATE_S1) {
+        video_slab_unref(local->handshakebuf.base);
+    }
+    video_slab_unref(local->msgheaderbuf.base);
 }
 
-static size_t rtmp_handshake_0(rtmp_context_t *context, size_t nread, const char *data) {
-    if (data[0] != 0x03) {
-        rtmp_disconnect(context->stream);
-        return 0;
-    }
-    context->state = RTMP_STATE_S1;
-    return 1;
+static void video_rtmp_allocbuf(uv_handle_t *handle, size_t size, uv_buf_t *buf) {
+    video_thread_t *thread = handle->loop->data;
+    *buf = uv_buf_init(video_slab_alloc(&thread->slab, 2048), 2048);
 }
 
-static int rtmp_handshake_findoffset(const char *data, int base) {
-    int offset = 0;
-    for (int i = 0; i < 4; i++) {
-        offset += data[base+i] & 0xFF;
-    }
-    return (offset % 728) + base + 4;
-}
-
-static void rtmp_handshake_makedigest(const char *data, int datalen, int offset, char *key, int keylen, char *digest) {
-    HMAC_CTX ctx;
-    HMAC_CTX_init(&ctx);
-    HMAC_Init_ex(&ctx, key, keylen, EVP_sha256(), 0);
-    if (offset > 0) {
-        HMAC_Update(&ctx, (const unsigned char *) data, (size_t) offset);
-    }
-
-    if (offset+32 < datalen) {
-        HMAC_Update(&ctx, (const unsigned char *) (data + offset + 32), (size_t) (datalen - offset - 32));
-    }
-
-    unsigned int resultlen = 32;
-    HMAC_Final(&ctx, (unsigned char *) digest, &resultlen);
-    HMAC_CTX_cleanup(&ctx);
-}
-
-static int rtmp_handshake_finddigest(const char *data, int datalen, char *digest, int base, char *key, int keylen) {
-    int offset = rtmp_handshake_findoffset(data, base);
-    rtmp_handshake_makedigest(data, datalen, offset, key, keylen, digest);
-    if (memcmp(digest, data+offset, 32) == 0) {
-        return 1;
-    }
-    return 0;
-}
-
-static void rtmp_write(uv_write_t *req, int status) {
-    bufslab_unref(req->data);
-    free(req);
-}
-
-static void rtmp_handshake_common(rtmp_context_t *context) {
-    uv_buf_t buf = rtmp_alloc_buf(context->stream, 1537);
-    buf.base[0] = 0x03;
-
-    memset(&buf.base[1], 0, 4);
-    memmove(&buf.base[5], SERVER_VERSION, 4);
-    srand((unsigned int) time(NULL));
-    for (int i = 9; i < 1537; i+=4) {
-        int rnd = rand();
-        memmove(&buf.base[i], &rnd, 4);
-    }
-
-    int offset = rtmp_handshake_findoffset(buf.base+1, 8);
-    rtmp_handshake_makedigest(buf.base+1, 1536, offset, SERVER_KEY_TEXT, sizeof(SERVER_KEY_TEXT), buf.base+1+offset);
-    uv_write_t *req = malloc(sizeof(uv_write_t));
-    req->data = buf.base;
-    uv_write(req, (uv_stream_t *) context->stream, &buf, 1, rtmp_write);
-}
-
-static void rtmp_handshake_new(rtmp_context_t *context, char *digest) {
-    rtmp_handshake_makedigest(digest, 32, 32, SERVER_KEY, sizeof(SERVER_KEY), digest);
-    rtmp_handshake_makedigest(context->handshakebuf.base, 1536, 1504, digest, 32, context->handshakebuf.base+1504);
-
-    uv_write_t *req = malloc(sizeof(uv_write_t));
-    req->data = context->handshakebuf.base;
-    uv_write(req, (uv_stream_t *) context->stream, &context->handshakebuf, 1, rtmp_write);
-}
-
-static void rtmp_handshake_old(rtmp_context_t *context) {
-    uv_write_t *req = malloc(sizeof(uv_write_t));
-    req->data = context->handshakebuf.base;
-    uv_write(req, (uv_stream_t *) context->stream, &context->handshakebuf, 1, rtmp_write);
-}
-
-static size_t rtmp_handshake_1(rtmp_context_t *context, size_t nread, const char *data) {
-    size_t tocopy = 1536 - context->handshakebuf.len;
-    if (tocopy > nread) {
-        tocopy = nread;
-    }
-
-    memmove(context->handshakebuf.base+context->handshakebuf.len, data, tocopy);
-    context->handshakebuf.len += tocopy;
-
-    if (context->handshakebuf.len != 1536) {
-        return tocopy;
-    }
-
-    char digest[32];
-    int found = rtmp_handshake_finddigest(context->handshakebuf.base, 1536, digest, 772, CLIENT_KEY_TEXT, sizeof(CLIENT_KEY_TEXT)) ||
-                rtmp_handshake_finddigest(context->handshakebuf.base, 1536, digest, 8, CLIENT_KEY_TEXT, sizeof(CLIENT_KEY_TEXT));
-
-    rtmp_handshake_common(context);
-    if (found) {
-        rtmp_handshake_new(context, digest);
-    } else {
-        rtmp_handshake_old(context);
-    }
-
-    context->handshakebuf.len = 0;
-    context->state = RTMP_STATE_S2;
-    return tocopy;
-}
-
-static size_t rtmp_handshake_2(rtmp_context_t *context, size_t nread, const char *data) {
-    size_t tocopy = 1536 - context->handshakebuf.len;
-    if (tocopy > nread) {
-        tocopy = nread;
-    }
-
-    context->handshakebuf.len += tocopy;
-
-    if (context->handshakebuf.len != 1536) {
-        return tocopy;
-    }
-
-    context->headerbuf = rtmp_alloc_buf(context->stream, RTMP_MAX_HEADER_SIZE);
-    context->headerbuf.len = 0;
-    context->messagebuf = rtmp_alloc_buf(context->stream, RTMP_MAX_MESSAGE_SIZE);
-    context->messagebuf.len = 0;
-    context->state = RTMP_STATE_HEADER;
-    return tocopy;
-}
-
-static void rtmp_free_chunk(void *data) {
-    rtmp_chunk_t *chunk = data;
-    bufslab_unref(chunk->buffer.base);
-    free(chunk);
-}
-
-static int rtmp_header(rtmp_context_t *context, size_t nread, const char *data) {
-    char *ptr = (char *) data;
-    char *tgt = context->headerbuf.base + context->headerbuf.len;
-    if (context->headerbuf.len == 0) {
-        *tgt++ = *ptr++;
-        context->headerbuf.len++;
-    }
-
-    int expectedlen;
-    switch (context->headerbuf.base[0] >> 6) {
-        case 0:
-            expectedlen = 11;
-            break;
-        case 1:
-            expectedlen = 7;
-            break;
-        case 2:
-            expectedlen = 3;
-            break;
-        default:
-        case 3:
-            expectedlen = 0;
-            break;
-    }
-
-    int chunkid = context->headerbuf.base[0] & 0x3F;
-
-    if (chunkid < 2) {
-        if (context->headerbuf.len == 1) {
-            *tgt++ = *ptr++;
-            context->headerbuf.len++;
-            if (data + nread <= ptr) {
-                return (int) (ptr - data);
-            }
-        }
-
-        if (context->headerbuf.len == 2 && chunkid == 1) {
-            *tgt++ = *ptr++;
-            context->headerbuf.len++;
-            if (data + nread <= ptr) {
-                return (int) (ptr - data);
-            }
-        }
-    }
-
-    int offset = 1;
-    if (chunkid == 0) {
-        chunkid = 64 + context->headerbuf.base[1];
-        offset = 2;
-    } else if (chunkid == 1) {
-        chunkid = 64 + context->headerbuf.base[1] * 256 + context->headerbuf.base[2];
-        offset = 3;
-    }
-
-    size_t left = 0;
-    size_t avail = nread - (ptr - data);
-
-    if (context->headerbuf.len < offset+expectedlen) {
-        left = expectedlen - (context->headerbuf.len-offset);
-        if (left > avail) {
-            left = avail;
-        }
-        memmove(tgt, ptr, left);
-        tgt += left;
-        ptr += left;
-        context->headerbuf.len += left;
-
-        if (context->headerbuf.len < offset+expectedlen) {
-            return (int) (ptr - data);
-        }
-    }
-
-    rtmp_chunk_t *chunk = 0;
-
-    for (int i = 0; i < context->chunks.size; i++) {
-        rtmp_chunk_t *chunkcand = context->chunks.nodes[i].data;
-        if (chunkcand->chunkid == chunkid) {
-            chunk = chunkcand;
-            break;
-        }
-    }
-
-    if (chunk == 0) {
-        chunk = malloc(sizeof(rtmp_chunk_t));
-        chunk->chunkid = chunkid;
-        chunk->buffer = rtmp_alloc_buf(context->stream, 65536);
-        arraylist_add(&context->chunks, chunk, rtmp_free_chunk);
-    }
-
-    context->header = chunk;
-
-    switch (context->headerbuf.base[0] >> 6) {
-        case 0:
-            chunk->stream = 0;
-            memmove(&chunk->stream, context->headerbuf.base+offset+7, 4);
-        case 1:
-            chunk->type = RTMP_MESSAGE_TYPE_0;
-            memmove(&chunk->type, context->headerbuf.base+offset+6, 1);
-            chunk->length = 0;
-            char *len = (char *) &chunk->length;
-            len[0] = context->headerbuf.base[offset+3+2];
-            len[1] = context->headerbuf.base[offset+3+1];
-            len[2] = context->headerbuf.base[offset+3];
-        case 2:
-            chunk->timestamp = 0;
-            memmove(&chunk->timestamp, context->headerbuf.base+offset, 3);
-        default:
-        case 3:
-            if (chunk->timestamp == 0xFFFFFF) {
-                memmove(&chunk, context->headerbuf.base+offset, 4);
-            }
-            break;
-    }
-
-    if (chunk->length > RTMP_MAX_MESSAGE_SIZE) {
-        fprintf(stderr, "[%p] Maximum message size exceeded, suggested: %d, max: %d\n", context, chunk->length, RTMP_MAX_MESSAGE_SIZE);
-        rtmp_disconnect(context->stream);
-    }
-
-    context->state = RTMP_STATE_BODY;
-    return (int) (ptr - data);
-}
-
-static void rtmp_message(rtmp_context_t *context, rtmp_chunk_t *header) {
-    amf_array_t amf;
-    printf("[%p] %s recceived\n", context, rtmp_message_type_names[header->type]);
-    switch (header->type) {
-        case RTMP_MESSAGE_TYPE_SET_CHUNK_SIZE:
-            break;
-        case RTMP_MESSAGE_TYPE_ABORT:
-            break;
-        case RTMP_MESSAGE_TYPE_ACKNOWLEDGEMENT:
-            break;
-        case RTMP_MESSAGE_TYPE_USER_CONTROL:
-            break;
-        case RTMP_MESSAGE_TYPE_WINDOW_ACKNOWLEDGEMENT_SIZE:
-            break;
-        case RTMP_MESSAGE_TYPE_SET_PEER_BANDWIDTH:
-            break;
-        case RTMP_MESSAGE_TYPE_AUDIO:
-            break;
-        case RTMP_MESSAGE_TYPE_VIDEO:
-            break;
-        case RTMP_MESSAGE_TYPE_AMF3_META:
-        case RTMP_MESSAGE_TYPE_AMF0_META:
-            break;
-        case RTMP_MESSAGE_TYPE_AMF3_CMD:
-        case RTMP_MESSAGE_TYPE_AMF3_CMD_ALT:
-        case RTMP_MESSAGE_TYPE_AMF0_CMD:
-            amf_array_decode(&amf, context->messagebuf.base, context->messagebuf.len);
-            amf_array_free(&amf);
-            break;
-        default:
-            rtmp_disconnect(context->stream);
-            break;
-    }
-}
-
-static int rtmp_body(rtmp_context_t *context, size_t nread, const char *data) {
-    rtmp_chunk_t *header = context->header;
-    size_t left = header->length - context->messagebuf.len;
-    if (left > context->inchunk) {
-        left = context->inchunk;
-    }
-
-    if (left > nread) {
-        left = nread;
-    }
-
-    memmove(context->messagebuf.base + context->messagebuf.len, data, left);
-    context->messagebuf.len += left;
-
-    if (context->messagebuf.len == header->length) {
-        rtmp_message(context, header);
-        context->messagebuf.len = 0;
-        context->headerbuf.len = 0;
-        context->state = RTMP_STATE_HEADER;
-    }
-
-    if (context->messagebuf.len % context->inchunk == 0) {
-        context->headerbuf.len = 0;
-        context->state = RTMP_STATE_HEADER;
-    }
-    return (int) left;
-}
-
-static void rtmp_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
+static void video_rtmp_readconn(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
+    video_rtmp_local_t *local = stream->data;
     if (nread < 0) {
-        rtmp_disconnect((uv_handle_t *) stream);
+        video_rtmp_disconnect(local);
     } else {
-        rtmp_context_t *context = stream->data;
-        size_t processed = 0;
-        while (processed < nread) {
-            rtmp_state oldstate = context->state;
-            size_t oldprocessed = processed;
-            switch (context->state) {
-                case RTMP_STATE_S0:
-                    processed += rtmp_handshake_0(context, (size_t) (nread - processed), buf->base + processed);
+        char *ptr = buf->base;
+        while (ptr - buf->base < nread && !uv_is_closing((const uv_handle_t *) stream)) {
+            video_rtmp_state prevstate = local->state;
+            char *prevptr = ptr;
+            switch (local->state) {
+                case VIDEO_RTMP_STATE_S0:
+                    ptr = video_rtmp_handshake_s0(local, ptr, nread - (ptr - buf->base));
                     break;
-                case RTMP_STATE_S1:
-                    processed += rtmp_handshake_1(context, (size_t) (nread - processed), buf->base + processed);
+                case VIDEO_RTMP_STATE_S1:
+                    ptr = video_rtmp_handshake_s1(local, ptr, nread - (ptr - buf->base));
                     break;
-                case RTMP_STATE_S2:
-                    processed += rtmp_handshake_2(context, (size_t) (nread - processed), buf->base + processed);
+                case VIDEO_RTMP_STATE_S2:
+                    ptr = video_rtmp_handshake_s2(local, ptr, nread - (ptr - buf->base));
                     break;
-                case RTMP_STATE_HEADER:
-                    processed += rtmp_header(context, (size_t) (nread - processed), buf->base + processed);
+                case VIDEO_RTMP_STATE_HEADER:
+                    ptr = video_rtmp_header(local, ptr, nread - (ptr - buf->base));
                     break;
-                case RTMP_STATE_BODY:
-                    processed += rtmp_body(context, (size_t) (nread - processed), buf->base + processed);
+                case VIDEO_RTMP_STATE_BODY:
+                    ptr = video_rtmp_body(local, ptr, nread - (ptr - buf->base));
                     break;
             }
-            if (oldprocessed == processed) {
-                fprintf(stderr, "[%p] %d bytes not processed, being skipped\n", context, (int) (nread - processed));
-                if (oldstate == context->state) {
-                    rtmp_disconnect(context->stream);
+            if (prevptr == ptr) {
+                printf("[%p] %ld bytes not processed\n", local, nread - (ptr - buf->base));
+                if (prevstate == local->state) {
+                    video_rtmp_disconnect(local);
+                    break;
                 }
-                break;
             }
         }
     }
-    bufslab_unref(buf->base);
+    video_slab_unref(buf->base);
 }
 
-static rtmp_context_t* rtmp_create_context(uv_stream_t *stream) {
-    rtmp_context_t *context = malloc(sizeof(rtmp_context_t));
-    arraylist_init(&context->chunks);
-    context->inchunk = 128;
-    context->outchunk = 128;
-    context->kind = RTMP_KIND_UNKNOWN;
-    context->state = RTMP_STATE_S0;
-    context->stream = (uv_handle_t *) stream;
-    context->handshakebuf = rtmp_alloc_buf((uv_handle_t *) stream, 1536);
-    context->handshakebuf.len = 0;
-    context->headerbuf.base = 0;
-    context->messagebuf.base = 0;
-    return context;
+static void video_rtmp_newconn(uv_stream_t *stream, int status) {
+    video_thread_t *thread = stream->loop->data;
+    video_rtmp_global_t *global = thread->data;
+    video_rtmp_local_t *local = video_slab_alloc(&thread->slab, sizeof(video_rtmp_local_t));
+
+    uv_tcp_init(stream->loop, &local->client);
+    uv_accept(stream, (uv_stream_t *) &local->client);
+
+    video_rtmp_local_init(local);
+    local->client.data = local;
+
+    video_list_add(&global->clients, local, 0);
+
+    printf("[%p] connected\n", local);
+    uv_read_start((uv_stream_t *) &local->client, video_rtmp_allocbuf, video_rtmp_readconn);
 }
 
-static void rtmp_free_context(void *data) {
-    rtmp_context_t *context = data;
-    arraylist_deinit(&context->chunks);
-    bufslab_unref(context->handshakebuf.base);
-    bufslab_unref(context->headerbuf.base);
-    bufslab_unref(context->messagebuf.base);
-    free(context);
+static void video_rtmp_remconn(uv_handle_t *handle) {
+    video_thread_t *thread = handle->loop->data;
+    video_rtmp_global_t *global = thread->data;
+    video_rtmp_local_t *local = handle->data;
+
+    printf("[%p] disconnected\n", local);
+
+    video_list_remove(&global->clients, local);
+    video_rtmp_local_deinit(local);
+    video_slab_unref(local);
 }
 
-void rtmp_init() {
-    arraylist_init(&global.channels);
-    arraylist_init(&global.contexts);
-
-    memmove(SERVER_KEY_TEXT, SERVER_KEY, sizeof(SERVER_KEY_TEXT));
-    memmove(CLIENT_KEY_TEXT, CLIENT_KEY, sizeof(CLIENT_KEY_TEXT));
+static void video_rtmp_writedone(uv_write_t *req, int status) {
+    video_slab_unref(req->data);
+    video_slab_unref(req);
 }
 
-void rtmp_connected(uv_stream_t* stream) {
-    rtmp_context_t *context = rtmp_create_context(stream);
-    printf("[%p] connected\n", context);
-    arraylist_add(&global.contexts, context, rtmp_free_context);
-    stream->data = context;
-    uv_read_start(stream, rtmp_read_alloc, rtmp_read);
+void video_rtmp_entry(video_thread_t *thread) {
+    video_rtmp_global_t *global = calloc(1, sizeof(video_rtmp_global_t));
+    video_list_init(&global->clients);
+
+    thread->data = global;
+
+    uv_tcp_init(&thread->loop, &global->listener);
+
+    struct sockaddr_in addr;
+    uv_ip4_addr("0.0.0.0", 1935, &addr);
+    uv_tcp_bind(&global->listener, (const struct sockaddr *) &addr, 0);
+    int r = uv_listen((uv_stream_t *) &global->listener, 16, video_rtmp_newconn);
+
+    if (r) {
+        printf("RTMP Listen error: %s\n", uv_strerror(r));
+    }
 }
 
-void rtmp_disconnect(uv_handle_t *stream) {
-    uv_close(stream, rtmp_disconnected);
+void video_rtmp_async(video_thread_t *thread, video_async_t *async) {
+    video_rtmp_global_t *global = thread->data;
+    switch (async->type) {
+        default:
+        case VIDEO_ASYNC_TYPE_NOOP:
+            break;
+        case VIDEO_ASYNC_TYPE_STOP:
+            for (size_t i = 0; i < global->clients.size; i++) {
+                video_rtmp_local_t *local = global->clients.nodes[i].data;
+                video_rtmp_disconnect(local);
+            }
+            video_list_deinit(&global->clients);
+            uv_close((uv_handle_t *) &global->listener, 0);
+            break;
+        case VIDEO_ASYNC_TYPE_STAT:
+            video_slab_stats(&thread->slab, thread->name);
+            break;
+    }
 }
 
-void rtmp_disconnected(uv_handle_t *stream) {
-    printf("[%p] disconnected\n", stream->data);
-    arraylist_rem(&global.contexts, stream->data);
-    free(stream);
+void video_rtmp_exit(video_thread_t *thread) {
+    video_rtmp_global_t *global = thread->data;
+    free(global);
 }
 
-void rtmp_deinit() {
-    arraylist_deinit(&global.channels);
-    arraylist_deinit(&global.contexts);
+void video_rtmp_disconnect(video_rtmp_local_t *local) {
+    if (!uv_is_closing((const uv_handle_t *) &local->client)) {
+        uv_close((uv_handle_t *) &local->client, video_rtmp_remconn);
+    }
+}
+
+void *video_rtmp_alloc(video_rtmp_local_t *local, size_t size) {
+    video_thread_t *thread = local->client.loop->data;
+    return video_slab_alloc(&thread->slab, size);
+}
+
+void video_rtmp_write(video_rtmp_local_t *local, uv_buf_t *buf) {
+    uv_write_t *req = video_rtmp_alloc(local, sizeof(uv_write_t));
+    req->data = buf->base;
+    uv_write(req, (uv_stream_t *) &local->client, buf, 1, video_rtmp_writedone);
 }

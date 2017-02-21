@@ -1,25 +1,142 @@
 //
-// Created by user on 2/15/17.
+// Created by user on 2/20/17.
 //
 
-#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include "amf.h"
 
-static void amf_freevalue(void *ptr) {
-    amf_value_t *value = ptr;
+static size_t video_amf_decode_entry(video_amf_value_t *value, void *data, size_t len) {
+    char *ptr = data;
+    size_t slen = 0;
+    slen |= *ptr++ << 8;
+    slen |= *ptr++;
+    char *key = calloc(1, slen+1);
+    memmove(key, ptr, slen);
+    ptr += slen;
+    video_amf_value_t *child = calloc(1, sizeof(video_amf_value_t));
+    ptr += video_amf_decode(child, ptr, len - (ptr - (char*) data));
+    video_map_put(&value->as.map, key, child, video_amf_value_free);
+    free(key);
+
+    return ptr - (char*) data;
+}
+
+static size_t video_amf_estimate_map(video_amf_value_t *value) {
+    size_t total = 0;
+    for (size_t i = 0; i < value->as.map.size; i++) {
+        video_map_entry_t *entry = value->as.map.nodes[i].data;
+        total += 2 + strlen(entry->key);
+        total += video_amf_estimate(entry->value);
+    }
+    return total;
+}
+
+static size_t video_amf_encode_map(video_amf_value_t *value, void *data) {
+    char *tgt = data;
+    uint16_t size16;
+    for (size_t i = 0; i < value->as.map.size; i++) {
+        video_map_entry_t *entry = value->as.map.nodes[i].data;
+        size16 = video_byte_swap_int16((uint16_t) strlen(entry->key));
+        memmove(tgt, &size16, 2);
+        tgt += 2;
+        memmove(tgt, entry->key, video_byte_swap_int16(size16));
+        tgt += video_byte_swap_int16(size16);
+        tgt += video_amf_encode(entry->value, tgt);
+    }
+    return tgt - (char*) data;
+}
+
+size_t video_amf_decode(video_amf_value_t *value, void *data, size_t len) {
+    char *ptr = data;
+    uint32_t size32 = 0;
+    uint32_t size16 = 0;
+    value->type = (video_amf_type) *ptr++;
     switch (value->type) {
-        case AMF_TYPE_LONGSTRING:
-        case AMF_TYPE_STRING:
+        case VIDEO_AMF_TYPE_NUMBER:
+            memmove(&value->as.dbl, ptr, 8);
+            ptr += 8;
+            video_byte_swap_generic(&value->as.dbl, 8);
+            break;
+        case VIDEO_AMF_TYPE_BOOLEAN:
+            value->as.bool = *ptr++;
+            break;
+        case VIDEO_AMF_TYPE_LONGSTRING:
+            size32 |= *ptr++ << 24;
+            size32 |= *ptr++ << 16;
+            size32 |= *ptr++ << 8;
+            size32 |= *ptr++;
+            value->as.str = calloc(1, size32+1);
+            memmove(value->as.str, ptr, size32);
+            ptr += size32;
+            break;
+        case VIDEO_AMF_TYPE_STRING:
+            size16 |= *ptr++ << 8;
+            size16 |= *ptr++;
+            value->as.str = calloc(1, size16+1);
+            memmove(value->as.str, ptr, size16);
+            ptr += size16;
+            break;
+        case VIDEO_AMF_TYPE_OBJECT:
+            video_map_init(&value->as.map);
+            while (ptr - (char*) data < len) {
+                if (*(ptr) == 0 && *(ptr+1) == 0 && *(ptr+2) == VIDEO_AMF_TYPE_OBJECTEND) {
+                    ptr += 3;
+                    break;
+                }
+                ptr += video_amf_decode_entry(value, ptr, len - (ptr - (char*) data));
+            }
+            break;
+        case VIDEO_AMF_TYPE_ECMAARRAY:
+            video_map_init(&value->as.map);
+            memmove(&size32, ptr, 4);
+            ptr += 4;
+            for (size_t i = 0; i < size32; i++) {
+                ptr += video_amf_decode_entry(value, ptr, len - (ptr - (char*) data));
+            }
+
+            break;
+        case VIDEO_AMF_TYPE_STRICTARRAY:
+            video_list_init(&value->as.list);
+            memmove(&size32, ptr, 4);
+            ptr += 4;
+            for (size_t i = 0; i < size32; i++) {
+                video_amf_value_t *child = calloc(1, sizeof(video_amf_value_t));
+                ptr += video_amf_decode(child, ptr, len - (ptr - (char*) data));
+                video_list_add(&value->as.list, child, video_amf_value_free);
+            }
+            break;
+        default:
+            break;
+    }
+
+
+    return ptr - (char*) data;
+}
+
+size_t video_amf_decodeall(video_list_t *list, void *data, size_t len) {
+    char *ptr = data;
+    while (ptr - (char*)data < len) {
+        video_amf_value_t *value = calloc(1, sizeof(video_amf_value_t));
+        ptr += video_amf_decode(value, ptr, len - (ptr - (char*) data));
+        video_list_add(list, value, video_amf_value_free);
+    }
+    return ptr - (char*) data;
+}
+
+void video_amf_value_free(void *ptr) {
+    video_amf_value_t *value = ptr;
+    switch (value->type) {
+        case VIDEO_AMF_TYPE_LONGSTRING:
+        case VIDEO_AMF_TYPE_STRING:
             free(value->as.str);
             break;
-        case AMF_TYPE_OBJECT:
-        case AMF_TYPE_ECMAARRAY:
-            amap_deinit(&value->as.map);
+        case VIDEO_AMF_TYPE_OBJECT:
+        case VIDEO_AMF_TYPE_ECMAARRAY:
+            video_map_deinit(&value->as.map);
             break;
-        case AMF_TYPE_STRICTARRAY:
-            arraylist_deinit(&value->as.list);
+        case VIDEO_AMF_TYPE_STRICTARRAY:
+            video_list_deinit(&value->as.list);
             break;
         default:
             break;
@@ -27,175 +144,137 @@ static void amf_freevalue(void *ptr) {
     free(value);
 }
 
-static void amf_byteswapnum(void *data) {
-    uint64_t num = *(uint64_t*)data;
-    num = (num & 0x00000000FFFFFFFF) << 32 | (num & 0xFFFFFFFF00000000) >> 32;
-    num = (num & 0x0000FFFF0000FFFF) << 16 | (num & 0xFFFF0000FFFF0000) >> 16;
-    num = (num & 0x00FF00FF00FF00FF) << 8  | (num & 0xFF00FF00FF00FF00) >> 8;
-    *(uint64_t*)data = num;
-}
-
-static size_t amf_readvalue(amf_value_t *value, char *data, size_t remain) {
-    char *ptr = data;
-    value->type = (amf_type) *ptr++;
-    size_t slen = 0;
+size_t video_amf_estimate(video_amf_value_t *value) {
+    size_t total = 1;
     switch (value->type) {
-        case AMF_TYPE_NUMBER:
-            memmove(&value->as.dbl, ptr, 8);
-            ptr += 8;
-            amf_byteswapnum(&value->as.dbl);
+        case VIDEO_AMF_TYPE_NUMBER:
+            total += 8;
             break;
-        case AMF_TYPE_BOOLEAN:
-            value->as.bool = *ptr++;
+        case VIDEO_AMF_TYPE_BOOLEAN:
+            total += 1;
             break;
-        case AMF_TYPE_LONGSTRING:
-            slen += *ptr++ << 24;
-            slen += *ptr++ << 16;
-        case AMF_TYPE_STRING:
-            slen += *ptr++ << 8;
-            slen += *ptr++;
-            value->as.str = calloc(1, slen + 1);
-            memmove(value->as.str, ptr, slen);
-            ptr += slen;
+        case VIDEO_AMF_TYPE_LONGSTRING:
+            total += 4 + strlen(value->as.str);
             break;
-        case AMF_TYPE_OBJECT:
-            amap_init(&value->as.map);
-            while (ptr - data < remain) {
-                slen = 0;
-                slen += *ptr++ << 8;
-                slen += *ptr++;
-                if (slen == 0 && *ptr == AMF_TYPE_OBJECTEND) {
-                    ptr++;
-                    break;
-                }
-                char *key = calloc(1, slen + 1);
-                memmove(key, ptr, slen);
-                ptr += slen;
-                amf_value_t *subvalue = malloc(sizeof(amf_value_t));
-                ptr += amf_readvalue(subvalue, ptr, remain - (ptr - data));
-                amap_add(&value->as.map, key, subvalue, amf_freevalue);
-                free(key);
-            }
+        case VIDEO_AMF_TYPE_STRING:
+            total += 2 + strlen(value->as.str);
             break;
-        case AMF_TYPE_ECMAARRAY:
-            amap_init(&value->as.map);
-            int elen;
-            memmove(&elen, ptr, 4);
-            ptr += 4;
-            for (int i = 0; i < elen; i++) {
-                slen = 0;
-                slen += *ptr++ << 8;
-                slen += *ptr++;
-                char *key = calloc(1, slen + 1);
-                memmove(key, ptr, slen);
-                ptr += slen;
-                amf_value_t *subvalue = malloc(sizeof(amf_value_t));
-                ptr += amf_readvalue(subvalue, ptr, remain - (ptr - data));
-                amap_add(&value->as.map, key, subvalue, amf_freevalue);
-                free(key);
-            }
+        case VIDEO_AMF_TYPE_OBJECT:
+            total += video_amf_estimate_map(value);
+            total += 3;
             break;
-        case AMF_TYPE_STRICTARRAY:
-            arraylist_init(&value->as.list);
-            int alen;
-            memmove(&alen, ptr, 4);
-            ptr += 4;
-            for (int i = 0; i < alen; i++) {
-                amf_value_t *subvalue = malloc(sizeof(amf_value_t));
-                ptr += amf_readvalue(subvalue, ptr, remain - (ptr - data));
-                arraylist_add(&value->as.list, subvalue, amf_freevalue);
+        case VIDEO_AMF_TYPE_ECMAARRAY:
+            total += 4;
+            total += video_amf_estimate_map(value);
+            break;
+        case VIDEO_AMF_TYPE_STRICTARRAY:
+            total += 4;
+            for (size_t i = 0; i < value->as.list.size; i++) {
+                total += video_amf_estimate(value->as.list.nodes[i].data);
             }
             break;
         default:
             break;
     }
-    return ptr - data;
+
+    return total;
 }
 
-void amf_array_decode(amf_array_t *amf, void *data, size_t len) {
-    arraylist_init(amf);
-    char *ptr = data;
-
-    while ((ptr - (char*) data) < len) {
-        amf_value_t *value = calloc(1, sizeof(amf_value_t));
-        ptr += amf_readvalue(value, ptr, len - (ptr - (char *)data));
-        arraylist_add(amf, value, amf_freevalue);
-    }
-}
-
-void amf_array_free(amf_array_t *amf) {
-    arraylist_deinit(amf);
-}
-
-size_t amf_array_encode(amf_value_t *value, void *data) {
-    char *ptr = data;
-
-    *ptr++ = value->type;
-    size_t slen = 0;
-    int size = 0;
+size_t video_amf_encode(video_amf_value_t *value, void *data) {
+    char *tgt = data;
+    uint16_t size16;
+    uint32_t size32;
+    *tgt++ = value->type;
+    double dbl;
     switch (value->type) {
-        case AMF_TYPE_NUMBER:
-            amf_byteswapnum(&value->as.dbl);
-            memmove(ptr, &value->as.dbl, 8);
-            ptr += 8;
+        case VIDEO_AMF_TYPE_NUMBER:
+            dbl = value->as.dbl;
+            video_byte_swap_generic(&dbl, 8);
+            memmove(tgt, &dbl, 8);
+            tgt += 8;
             break;
-        case AMF_TYPE_BOOLEAN:
-            *ptr++ = value->as.bool;
+        case VIDEO_AMF_TYPE_BOOLEAN:
+            *tgt++ = value->as.bool;
             break;
-        case AMF_TYPE_LONGSTRING:
-            slen = strlen(value->as.str);
-            *ptr++ = (char) ((slen >> 24) & 0xFF);
-            *ptr++ = (char) ((slen >> 16) & 0xFF);
-            *ptr++ = (char) ((slen >> 8) & 0xFF);
-            *ptr++ = (char) (slen & 0xFF);
-            memmove(ptr, value->as.str, slen);
-            ptr += slen;
+        case VIDEO_AMF_TYPE_LONGSTRING:
+            size32 = video_byte_swap_int32((uint32_t) strlen(value->as.str));
+            memmove(tgt, &size32, 4);
+            tgt += 4;
+            memmove(tgt, value->as.str, video_byte_swap_int32(size32));
+            tgt += video_byte_swap_int32(size32);
             break;
-        case AMF_TYPE_STRING:
-            slen = strlen(value->as.str);
-            *ptr++ = (char) ((slen >> 8) & 0xFF);
-            *ptr++ = (char) (slen & 0xFF);
-            memmove(ptr, value->as.str, slen);
-            ptr += slen;
+        case VIDEO_AMF_TYPE_STRING:
+            size16 = video_byte_swap_int16((uint16_t) strlen(value->as.str));
+            memmove(tgt, &size16, 2);
+            tgt += 2;
+            memmove(tgt, value->as.str, video_byte_swap_int16(size16));
+            tgt += video_byte_swap_int16(size16);
             break;
-        case AMF_TYPE_OBJECT:
-            for (int i = 0; i < value->as.map.entries.size; i++) {
-                amap_entry_t *entry = value->as.map.entries.nodes[i].data;
-
-                slen = strlen(entry->key);
-                *ptr++ = (char) ((slen >> 8) & 0xFF);
-                *ptr++ = (char) (slen & 0xFF);
-                memmove(ptr, entry->key, slen);
-                ptr += slen;
-                ptr += amf_array_encode(entry->value, ptr);
-            }
-            *ptr++ = 0;
-            *ptr++ = 0;
-            *ptr++ = AMF_TYPE_OBJECTEND;
+        case VIDEO_AMF_TYPE_OBJECT:
+            tgt += video_amf_encode_map(value, tgt);
+            *tgt++ = 0;
+            *tgt++ = 0;
+            *tgt++ = VIDEO_AMF_TYPE_OBJECTEND;
             break;
-        case AMF_TYPE_ECMAARRAY:
-            size = value->as.map.entries.size;
-            memmove(ptr, &size, 4);
-            ptr += 4;
-            for (int i = 0; i < size; i++) {
-                amap_entry_t *entry = value->as.map.entries.nodes[i].data;
-                slen = strlen(entry->key);
-                *ptr++ = (char) ((slen >> 8) & 0xFF);
-                *ptr++ = (char) (slen & 0xFF);
-                memmove(ptr, entry->key, slen);
-                ptr += slen;
-                ptr += amf_array_encode(entry->value, ptr);
-            }
+        case VIDEO_AMF_TYPE_ECMAARRAY:
+            size32 = video_byte_swap_int32((uint32_t) value->as.map.size);
+            memmove(tgt, &size32, 4);
+            tgt += 4;
+            tgt += video_amf_encode_map(value, tgt);
             break;
-        case AMF_TYPE_STRICTARRAY:
-            memmove(ptr, &value->as.list.size, 4);
-            ptr += 4;
-            for (int i = 0; i < value->as.list.size; i++) {
-                ptr += amf_array_encode(value->as.list.nodes[i].data, ptr);
+        case VIDEO_AMF_TYPE_STRICTARRAY:
+            size32 = video_byte_swap_int32((uint32_t) value->as.list.size);
+            memmove(tgt, &size32, 4);
+            for (size_t i = 0; i < value->as.list.size; i++) {
+                tgt += video_amf_encode(value->as.list.nodes[i].data, tgt);
             }
             break;
         default:
             break;
     }
-    return ptr - (char*) data;
+    return tgt - (char*) data;
+}
+
+video_amf_value_t *video_amf_make_number(double value) {
+    video_amf_value_t *amfvalue = calloc(1, sizeof(video_amf_value_t));
+    amfvalue->type = VIDEO_AMF_TYPE_NUMBER;
+    amfvalue->as.dbl = value;
+    return amfvalue;
+}
+
+video_amf_value_t *video_amf_make_bool(char value) {
+    video_amf_value_t *amfvalue = calloc(1, sizeof(video_amf_value_t));
+    amfvalue->type = VIDEO_AMF_TYPE_BOOLEAN;
+    amfvalue->as.bool = value;
+    return amfvalue;
+}
+video_amf_value_t *video_amf_make_string(char *value) {
+    video_amf_value_t *amfvalue = calloc(1, sizeof(video_amf_value_t));
+    amfvalue->type = VIDEO_AMF_TYPE_STRING;
+    amfvalue->as.str = strdup(value);
+    return amfvalue;
+}
+video_amf_value_t *video_amf_make_object() {
+    video_amf_value_t *amfvalue = calloc(1, sizeof(video_amf_value_t));
+    amfvalue->type = VIDEO_AMF_TYPE_OBJECT;
+    video_map_init(&amfvalue->as.map);
+    return amfvalue;
+}
+
+video_amf_value_t *video_amf_make_ecmaarray() {
+    video_amf_value_t *amfvalue = calloc(1, sizeof(video_amf_value_t));
+    amfvalue->type = VIDEO_AMF_TYPE_ECMAARRAY;
+    video_map_init(&amfvalue->as.map);
+    return amfvalue;
+}
+video_amf_value_t *video_amf_make_strictarray() {
+    video_amf_value_t *amfvalue = calloc(1, sizeof(video_amf_value_t));
+    amfvalue->type = VIDEO_AMF_TYPE_ECMAARRAY;
+    video_map_init(&amfvalue->as.map);
+    return amfvalue;
+}
+video_amf_value_t *video_amf_make_null() {
+    video_amf_value_t *amfvalue = calloc(1, sizeof(video_amf_value_t));
+    amfvalue->type = VIDEO_AMF_TYPE_NULL;
+    return amfvalue;
 }
