@@ -6,9 +6,10 @@
 #define VIDEO_RTMP_H
 
 #include <uv.h>
+#include <channel/channel.h>
 #include "global/global.h"
 
-#define VIDEO_RTMP_MESSAGE_MAX 1048576
+    #define VIDEO_RTMP_MESSAGE_MAX 2097152
 
 typedef struct video_rtmp_global_s video_rtmp_global_t;
 struct video_rtmp_global_s {
@@ -96,15 +97,18 @@ struct video_rtmp_chunk_s {
 
 typedef struct video_rtmp_local_s video_rtmp_local_t;
 struct video_rtmp_local_s {
+    video_thread_t *thread;
     uv_tcp_t client;
     video_rtmp_state state;
     video_rtmp_kind kind;
+    video_channel_publisher_t publisher;
+    video_channel_subscriber_t subscriber;
 
     video_list_t chunks;
     video_rtmp_chunk_t *header;
 
-    size_t inchunksiz;
-    size_t outchunksiz;
+    uint32_t inchunksiz;
+    uint32_t outchunksiz;
 
     uv_buf_t handshakebuf;
     uv_buf_t msgheaderbuf;

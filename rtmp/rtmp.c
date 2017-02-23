@@ -44,6 +44,7 @@ static void video_rtmp_readconn(uv_stream_t *stream, ssize_t nread, const uv_buf
     } else {
         char *ptr = buf->base;
         while (ptr - buf->base < nread && !uv_is_closing((const uv_handle_t *) stream)) {
+            //printf("%ld/%ld @ %s\n", ptr-buf->base, nread, local->state == VIDEO_RTMP_STATE_HEADER ? "HEADER" : "BODY");
             video_rtmp_state prevstate = local->state;
             char *prevptr = ptr;
             switch (local->state) {
@@ -64,7 +65,7 @@ static void video_rtmp_readconn(uv_stream_t *stream, ssize_t nread, const uv_buf
                     break;
             }
             if (prevptr == ptr) {
-                printf("[%p] %ld bytes not processed\n", local, nread - (ptr - buf->base));
+                printf("[%p] %ld bytes not processed at state %s\n", local, nread - (ptr - buf->base), prevstate == VIDEO_RTMP_STATE_HEADER ? "HEADER" : "BODY");
                 if (prevstate == local->state) {
                     video_rtmp_disconnect(local);
                     break;
@@ -80,6 +81,7 @@ static void video_rtmp_newconn(uv_stream_t *stream, int status) {
     video_rtmp_global_t *global = thread->data;
     video_rtmp_local_t *local = video_slab_alloc(&thread->slab, sizeof(video_rtmp_local_t));
 
+    local->thread = thread;
     uv_tcp_init(stream->loop, &local->client);
     uv_accept(stream, (uv_stream_t *) &local->client);
 
@@ -96,6 +98,18 @@ static void video_rtmp_remconn(uv_handle_t *handle) {
     video_thread_t *thread = handle->loop->data;
     video_rtmp_global_t *global = thread->data;
     video_rtmp_local_t *local = handle->data;
+
+    switch (local->kind) {
+        case VIDEO_RTMP_KIND_UNDECIDED:
+            break;
+        case VIDEO_RTMP_KIND_PUBISHER:
+            video_channel_unpublish(&local->publisher);
+            break;
+        case VIDEO_RTMP_KIND_SUBSCRIBER:
+            video_channel_unsubscribe(&local->subscriber);
+            video_list_remove(&local->subscriber.channel->subscribers, &local->subscriber);
+            break;
+    }
 
     printf("[%p] disconnected\n", local);
 

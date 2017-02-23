@@ -90,6 +90,8 @@ void video_global_init(video_global_t *global) {
     global->mp4.latch.data = &global->mp4.queue;
     global->mp4.name = "MP4";
     uv_thread_create(&global->mp4.thread, video_global_entry, &global->mp4);
+
+    video_map_init(&global->channels);
 }
 
 void video_global_deinit(video_global_t *global) {
@@ -103,5 +105,5 @@ void video_global_deinit(video_global_t *global) {
     video_slab_deinit(&global->rtmp.slab);
     video_slab_deinit(&global->mp4.slab);
 
-    uv_mutex_destroy(&global->mutex);
+    video_map_deinit(&global->channels);
 }

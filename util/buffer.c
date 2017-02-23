@@ -9,6 +9,7 @@
 static void video_pool_free(void *ptr) {
     video_pool_t *pool = ptr;
     video_list_deinit(&pool->buffers);
+    uv_mutex_destroy(&pool->mutex);
     free(pool);
 }
 
@@ -27,6 +28,7 @@ void video_slab_init(video_slab_t *slab, size_t min, size_t max, size_t presize)
         pool->bufsiz = i;
         video_list_init(&pool->buffers);
         video_list_add(&slab->pools, pool, video_pool_free);
+        uv_mutex_init(&pool->mutex);
 
         for (size_t n = 0; n < presize; n++) {
             video_buffer_t *buffer = calloc(1, sizeof(video_buffer_t) + i);
@@ -64,10 +66,12 @@ void *video_slab_alloc(video_slab_t *slab, size_t size) {
     }
 
     video_pool_t *pool = slab->pools.nodes[idx].data;
+    uv_mutex_lock(&pool->mutex);
     for (size_t i = 0; i < pool->buffers.size; i++) {
         video_buffer_t *buffer = pool->buffers.nodes[i].data;
         if (buffer->refcount == 0) {
             buffer->refcount = 1;
+            uv_mutex_unlock(&pool->mutex);
             return (char*)buffer + sizeof(video_buffer_t);
         }
     }
@@ -77,12 +81,15 @@ void *video_slab_alloc(video_slab_t *slab, size_t size) {
     buffer->refcount = 1;
     video_list_add(&pool->buffers, buffer, video_buffer_free);
 
+    uv_mutex_unlock(&pool->mutex);
     return (char*)buffer + sizeof(video_buffer_t);
 }
 
 void video_slab_ref(void *ptr) {
     video_buffer_t *buffer = (video_buffer_t *) ((char *) ptr - sizeof(video_buffer_t));
+    uv_mutex_lock(&buffer->pool->mutex);
     buffer->refcount++;
+    uv_mutex_unlock(&buffer->pool->mutex);
 }
 
 void video_slab_unref(void *ptr) {
@@ -91,12 +98,15 @@ void video_slab_unref(void *ptr) {
     }
 
     video_buffer_t *buffer = (video_buffer_t *) ((char *) ptr - sizeof(video_buffer_t));
+    uv_mutex_lock(&buffer->pool->mutex);
     if (buffer->refcount == 0) {
         printf("Requested freeing already unreferenced buffer %p (%ld)\n", ptr, buffer->pool->bufsiz);
+        uv_mutex_unlock(&buffer->pool->mutex);
         return;
     }
 
     buffer->refcount--;
+    uv_mutex_unlock(&buffer->pool->mutex);
 }
 
 void video_slab_stats(video_slab_t *slab, char *header) {

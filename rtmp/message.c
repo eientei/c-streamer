@@ -27,6 +27,10 @@ static void video_rtmp_writefree(uv_write_t *req, int status) {
 
 static void video_rtmp_send(video_rtmp_local_t *local, uint32_t chunkid, uint32_t streamid, video_rtmp_msgtype type, uint32_t time, void *data, size_t len) {
     size_t totalsize = 11 + len + len / local->outchunksiz;
+    size_t rem = len % local->outchunksiz;
+    if (rem == 0) {
+        totalsize -= 1;
+    }
     if (chunkid >= 319) {
         totalsize += 3;
     } else if (chunkid >= 64) {
@@ -45,8 +49,8 @@ static void video_rtmp_send(video_rtmp_local_t *local, uint32_t chunkid, uint32_
     char *ptr = buf.base;
     ptr += video_rmtp_writebasic(0, chunkid, ptr);
 
-    uint32_t timep = time > 0xFFFFFF ? 0xFFFFFF : time;
-    memmove(ptr, (char*)&timep, 3);
+    uint32_t timep = video_byte_swap_int32(time > 0xFFFFFF ? 0xFFFFFF : time);
+    memmove(ptr, (char*)&timep+1, 3);
     ptr += 3;
 
     uint32_t lenp = video_byte_swap_int32(len);
@@ -59,6 +63,7 @@ static void video_rtmp_send(video_rtmp_local_t *local, uint32_t chunkid, uint32_
     ptr += 4;
 
     if (timep == 0xFFFFFF) {
+        timep = video_byte_swap_int32(time);
         memmove(ptr, &time, 4);
         ptr += 4;
     }
@@ -72,7 +77,6 @@ static void video_rtmp_send(video_rtmp_local_t *local, uint32_t chunkid, uint32_
         src += local->outchunksiz;
     }
 
-    size_t rem = len % local->outchunksiz;
     if (rem != 0) {
         if (len > local->outchunksiz) {
             ptr += video_rmtp_writebasic(3, chunkid, ptr);
@@ -85,6 +89,7 @@ static void video_rtmp_send(video_rtmp_local_t *local, uint32_t chunkid, uint32_
     uv_write_t *req = calloc(1, sizeof(uv_write_t));
     req->data = buf.base;
     uv_write(req, (uv_stream_t *) &local->client, &buf, 1, video_rtmp_writefree);
+    //printf("[%p] send: %s (%10ld)\n", local, video_rtmp_msgtype_names[type], len);
 }
 
 static void video_rtmp_command_connect(video_rtmp_local_t *local, video_list_t *list) {
@@ -158,24 +163,110 @@ static void video_rtmp_command_create(video_rtmp_local_t *local, video_list_t *l
     video_amf_value_free(res_num);
 }
 
-static void video_rtmp_command_publish(video_rtmp_local_t *local, video_list_t *list) {
+static void video_rtmp_subscribe(video_message_t *message, void *data) {
+    video_rtmp_local_t *local = data;
+    //printf("%d\n", message->time);
+    switch (message->type) {
+        case VIDEO_MESSAGE_TYPE_META:
+            video_rtmp_send(local, 3, 0, VIDEO_RTMP_MSGTYPE_AMF0_META, message->time, message->data, message->len);
+            break;
+        case VIDEO_MESSAGE_TYPE_VIDEO:
+            video_rtmp_send(local, 6, 0, VIDEO_RTMP_MSGTYPE_VIDEO, message->time, message->data, message->len);
+            break;
+        case VIDEO_MESSAGE_TYPE_AUDIO:
+            video_rtmp_send(local, 8, 0, VIDEO_RTMP_MSGTYPE_AUDIO, message->time, message->data, message->len);
+            break;
 
+    }
+    video_slab_unref(message->data);
+}
+
+static void video_rtmp_command_publish(video_rtmp_local_t *local, video_list_t *list) {
+    video_map_t *channelmap = &local->thread->global->channels;
+    video_amf_value_t *value = list->nodes[3].data;
+    char *channelname = value->as.str;
+    video_channel_t *channel = video_map_get(channelmap, channelname);
+    if (!channel) {
+        channel = calloc(1, sizeof(video_channel_t));
+        video_channel_init(channel, channelname);
+        video_map_put(channelmap, channelname, channel, (free_cb) video_channel_deinit);
+    }
+
+    if (channel->publisher) {
+        video_rtmp_disconnect(local);
+        return;
+    }
+    local->kind = VIDEO_RTMP_KIND_PUBISHER;
+    video_channel_publish(&local->publisher, channel, local->thread);
+
+    video_amf_value_t *res_str = video_amf_make_string("onStatus");
+    video_amf_value_t *res_num = video_amf_make_number(0.0);
+    video_amf_value_t *res_null = video_amf_make_null();
+    video_amf_value_t *res_obj = video_amf_make_object();
+    video_map_put(&res_obj->as.map, "level", video_amf_make_string("status"), video_amf_value_free);
+    video_map_put(&res_obj->as.map, "code", video_amf_make_string("NetStream.Publish.Start"), video_amf_value_free);
+    video_map_put(&res_obj->as.map, "description", video_amf_make_string("Start pubishing."), video_amf_value_free);
+
+    size_t esteem = video_amf_estimate(res_str)
+                    + video_amf_estimate(res_num)
+                    + video_amf_estimate(res_null)
+                    + video_amf_estimate(res_obj);
+
+    void *publish_body = video_rtmp_alloc(local, esteem);
+    char *ptr = publish_body;
+    ptr += video_amf_encode(res_str, ptr);
+    ptr += video_amf_encode(res_num, ptr);
+    ptr += video_amf_encode(res_null, ptr);
+    ptr += video_amf_encode(res_obj, ptr);
+
+    video_rtmp_send(local, 3, 0, VIDEO_RTMP_MSGTYPE_AMF0_CMD, 0, publish_body, esteem);
+
+    video_slab_unref(publish_body);
+    video_amf_value_free(res_str);
+    video_amf_value_free(res_num);
+    video_amf_value_free(res_null);
+    video_amf_value_free(res_obj);
 }
 
 static void video_rtmp_command_play(video_rtmp_local_t *local, video_list_t *list) {
+    video_map_t *channelmap = &local->thread->global->channels;
+    video_amf_value_t *value = list->nodes[3].data;
+    char *channelname = value->as.str;
+    video_channel_t *channel = video_map_get(channelmap, channelname);
+    if (!channel) {
+        video_rtmp_disconnect(local);
+        return;
+    }
 
+    local->kind = VIDEO_RTMP_KIND_SUBSCRIBER;
+    video_channel_subscribe(&local->subscriber, channel, local->thread, video_rtmp_subscribe, local);
+    video_list_add(&channel->subscribers, &local->subscriber, 0);
 }
 
 static void video_rtmp_message(video_rtmp_local_t *local) {
-    printf("[%p] recv: %s\n", local, video_rtmp_msgtype_names[local->header->type]);
+    //printf("[%p] recv: %s\n", local, video_rtmp_msgtype_names[local->header->type]);
     video_list_t list;
     switch (local->header->type) {
         case VIDEO_RTMP_MSGTYPE_SET_CHUNK_SIZE:
-            printf("[%p] setting chunksize to %ld\n", local, local->inchunksiz);
             memmove(&local->inchunksiz, local->header->msgbodybuf.base, 4);
+            video_byte_swap_generic(&local->inchunksiz, 4);
+            printf("[%p] setting chunksize to %d\n", local, local->inchunksiz);
             break;
         case VIDEO_RTMP_MSGTYPE_AMF0_META:
         case VIDEO_RTMP_MSGTYPE_AMF3_META:
+            if (local->kind == VIDEO_RTMP_KIND_PUBISHER) {
+                video_channel_broadcast(&local->publisher, VIDEO_MESSAGE_TYPE_META, local->header->timestamp, local->header->msgbodybuf.base, local->header->msgbodybuf.len);
+            }
+            break;
+        case VIDEO_RTMP_MSGTYPE_VIDEO:
+            if (local->kind == VIDEO_RTMP_KIND_PUBISHER) {
+                video_channel_broadcast(&local->publisher, VIDEO_MESSAGE_TYPE_VIDEO, local->header->timestamp, local->header->msgbodybuf.base, local->header->msgbodybuf.len);
+            }
+            break;
+        case VIDEO_RTMP_MSGTYPE_AUDIO:
+            if (local->kind == VIDEO_RTMP_KIND_PUBISHER) {
+                video_channel_broadcast(&local->publisher, VIDEO_MESSAGE_TYPE_AUDIO, local->header->timestamp, local->header->msgbodybuf.base, local->header->msgbodybuf.len);
+            }
             break;
         case VIDEO_RTMP_MSGTYPE_AMF3_CMD_ALT:
         case VIDEO_RTMP_MSGTYPE_AMF3_CMD:;
@@ -210,16 +301,17 @@ char *video_rtmp_header(video_rtmp_local_t *local, char *data, size_t len) {
     char *ptr = data;
     char *tgt = local->msgheaderbuf.base + local->msgheaderbuf.len;
 
+    if (len == 0) {
+        return ptr;
+    }
+
     if (local->msgheaderbuf.len == 0) {
         local->msgheaderbuf.base[0] = ptr[0];
         local->msgheaderbuf.len = 1;
         ptr += 1;
         tgt += 1;
-        if (len == 1) {
-            return ptr;
-        }
     }
-    int headertype = local->msgheaderbuf.base[0] >> 6;
+    int headertype = (local->msgheaderbuf.base[0] & 0xFF) >> 6;
     size_t headerlen = 1;
 
     switch (headertype) {
@@ -256,7 +348,7 @@ char *video_rtmp_header(video_rtmp_local_t *local, char *data, size_t len) {
         memmove(tgt, ptr, remaining);
         ptr += remaining;
         local->msgheaderbuf.len += remaining;
-        if (avail == remaining) {
+        if (local->msgheaderbuf.len < headerlen) {
             return ptr;
         }
     }
@@ -290,9 +382,13 @@ char *video_rtmp_header(video_rtmp_local_t *local, char *data, size_t len) {
     if (!local->header) {
         local->header = video_rtmp_alloc(local, sizeof(video_rtmp_chunk_t));
         local->header->chunkid = chunkid;
-        local->header->msgbodybuf.base = video_rtmp_alloc(local, VIDEO_RTMP_MESSAGE_MAX);
+        local->header->msgbodybuf.base = 0;
         local->header->msgbodybuf.len = 0;
         video_list_add(&local->chunks, local->header, video_rtmp_chunk_free);
+    }
+
+    if (local->header->msgbodybuf.base == 0) {
+        local->header->msgbodybuf.base = video_rtmp_alloc(local, VIDEO_RTMP_MESSAGE_MAX);
     }
 
     uint32_t time = 0;
@@ -311,6 +407,7 @@ char *video_rtmp_header(video_rtmp_local_t *local, char *data, size_t len) {
             video_byte_swap_generic(&local->header->length, 4);
         case 2:
             memmove((char*)&time + 1, tgt, 3);
+            video_byte_swap_generic(&time, 4);
             if (headertype == 0) {
                 local->header->timediff = 0;
                 local->header->timestamp = time;
@@ -339,6 +436,7 @@ char *video_rtmp_body(video_rtmp_local_t *local, char *ptr, size_t len) {
     size_t untilchunk = local->inchunksiz - (local->header->msgbodybuf.len % local->inchunksiz);
     size_t untildone = local->header->length - local->header->msgbodybuf.len;
 
+    //printf("%ld .. %ld | %ld\n", untilchunk, untildone, len);
     size_t remaining = (untilchunk > untildone) ? untildone : untilchunk;
     if (remaining > len) {
         remaining = len;
@@ -351,6 +449,8 @@ char *video_rtmp_body(video_rtmp_local_t *local, char *ptr, size_t len) {
 
     if (local->header->msgbodybuf.len == local->header->length) {
         video_rtmp_message(local);
+        video_slab_unref(local->header->msgbodybuf.base);
+        local->header->msgbodybuf.base = 0;
         local->header->msgbodybuf.len = 0;
         local->msgheaderbuf.len = 0;
         local->state = VIDEO_RTMP_STATE_HEADER;

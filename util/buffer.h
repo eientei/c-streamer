@@ -5,6 +5,7 @@
 #ifndef VIDEO_BUFFER_H
 #define VIDEO_BUFFER_H
 
+#include <uv.h>
 #include "util/generic.h"
 #include "util/list.h"
 
@@ -19,6 +20,7 @@ typedef struct video_pool_s video_pool_t;
 struct video_pool_s {
     size_t bufsiz;
     video_list_t buffers;
+    uv_mutex_t mutex;
 };
 
 typedef struct video_buffer_s video_buffer_t;

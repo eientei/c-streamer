@@ -6,6 +6,7 @@
 #define VIDEO_GLOBAL_H
 
 #include <uv.h>
+#include <util/map.h>
 #include "util/buffer.h"
 #include "util/queue.h"
 #include "util/generic.h"
@@ -53,6 +54,8 @@ struct video_global_s {
     uv_mutex_t mutex;
     uv_signal_t sigint;
     uv_signal_t sigusr;
+
+    video_map_t channels;
 };
 
 void video_make_async(uv_async_t *async, video_async_type type, void *data, free_cb freedata);
