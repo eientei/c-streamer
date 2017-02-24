@@ -90,7 +90,7 @@ static void video_rtmp_newconn(uv_stream_t *stream, int status) {
 
     video_list_add(&global->clients, local, 0);
 
-    printf("[%p] connected\n", local);
+    //printf("[%p] connected\n", local);
     uv_read_start((uv_stream_t *) &local->client, video_rtmp_allocbuf, video_rtmp_readconn);
 }
 
@@ -104,14 +104,20 @@ static void video_rtmp_remconn(uv_handle_t *handle) {
             break;
         case VIDEO_RTMP_KIND_PUBISHER:
             video_channel_unpublish(&local->publisher);
+            if (local->publisher.channel->subscribers.size == 0) {
+                video_map_remove(&thread->global->channels, local->publisher.channel->name);
+            }
             break;
         case VIDEO_RTMP_KIND_SUBSCRIBER:
             video_channel_unsubscribe(&local->subscriber);
             video_list_remove(&local->subscriber.channel->subscribers, &local->subscriber);
+            if (local->subscriber.channel->subscribers.size == 0 && !local->subscriber.channel->publisher) {
+                video_map_remove(&thread->global->channels, local->subscriber.channel->name);
+            }
             break;
     }
 
-    printf("[%p] disconnected\n", local);
+    //printf("[%p] disconnected\n", local);
 
     video_list_remove(&global->clients, local);
     video_rtmp_local_deinit(local);
@@ -123,11 +129,20 @@ static void video_rtmp_writedone(uv_write_t *req, int status) {
     video_slab_unref(req);
 }
 
+static void video_rtmp_timer(uv_timer_t *timer) {
+    video_thread_t *thread = timer->data;
+    video_slab_stats(&thread->slab, 0);
+}
+
 void video_rtmp_entry(video_thread_t *thread) {
     video_rtmp_global_t *global = calloc(1, sizeof(video_rtmp_global_t));
     video_list_init(&global->clients);
 
     thread->data = global;
+
+    uv_timer_init(&thread->loop, &global->timer);
+    global->timer.data = thread;
+    uv_timer_start(&global->timer, video_rtmp_timer, 2000, 2000);
 
     uv_tcp_init(&thread->loop, &global->listener);
 
@@ -154,6 +169,7 @@ void video_rtmp_async(video_thread_t *thread, video_async_t *async) {
             }
             video_list_deinit(&global->clients);
             uv_close((uv_handle_t *) &global->listener, 0);
+            uv_close((uv_handle_t *) &global->timer, 0);
             break;
         case VIDEO_ASYNC_TYPE_STAT:
             video_slab_stats(&thread->slab, thread->name);

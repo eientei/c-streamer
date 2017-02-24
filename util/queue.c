@@ -12,13 +12,18 @@ void video_queue_init(video_queue_t *queue) {
 }
 
 void video_queue_deinit(video_queue_t *queue) {
-    for (video_queue_node_t *node = queue->head.next; node != 0; node = node->next) {
+    for (video_queue_node_t *node = queue->head.next; node;) {
+        video_queue_node_t *tmpnode = node->next;
+        if (node->cb) {
+            node->cb(node->data);
+        }
         free(node);
+        node = tmpnode;
     }
     uv_mutex_destroy(&queue->mutex);
 }
 
-void video_queue_enqueue(video_queue_t *queue, void *data) {
+void video_queue_enqueue(video_queue_t *queue, void *data, free_cb cb) {
     uv_mutex_lock(&queue->mutex);
     video_queue_node_t *node = &queue->head;
     while (node->next) {
@@ -27,6 +32,7 @@ void video_queue_enqueue(video_queue_t *queue, void *data) {
     node->next = calloc(1, sizeof(video_queue_node_t));
     node->next->data = data;
     node->next->next = 0;
+    node->next->cb = cb;
     uv_mutex_unlock(&queue->mutex);
 }
 

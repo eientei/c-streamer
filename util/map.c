@@ -35,7 +35,7 @@ void video_map_remove(video_map_t *map, char *key) {
     for (size_t i = 0; i < map->size; i++) {
         video_map_entry_t *entry = map->nodes[i].data;
         if (strcmp(key, entry->key) == 0) {
-            video_map_entry_free(entry);
+            video_list_remove(map, entry);
             return;
         }
     }

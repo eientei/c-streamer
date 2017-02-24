@@ -89,7 +89,7 @@ static void video_rtmp_send(video_rtmp_local_t *local, uint32_t chunkid, uint32_
     uv_write_t *req = calloc(1, sizeof(uv_write_t));
     req->data = buf.base;
     uv_write(req, (uv_stream_t *) &local->client, &buf, 1, video_rtmp_writefree);
-    //printf("[%p] send: %s (%10ld)\n", local, video_rtmp_msgtype_names[type], len);
+    //printf("[%p] send: %s (%10ld) %10d\n", local, video_rtmp_msgtype_names[type], len, time);
 }
 
 static void video_rtmp_command_connect(video_rtmp_local_t *local, video_list_t *list) {
@@ -117,10 +117,10 @@ static void video_rtmp_command_connect(video_rtmp_local_t *local, video_list_t *
     video_map_put(&res_stat->as.map, "description", video_amf_make_string("Connection succeeded."), video_amf_value_free);
     video_map_put(&res_stat->as.map, "objectEncoding", video_amf_make_number(3.0), video_amf_value_free);
 
-    size_t esteem = video_amf_estimate(res_str)
-                    + video_amf_estimate(res_echo)
-                    + video_amf_estimate(res_caps)
-                    + video_amf_estimate(res_stat);
+    size_t esteem = video_amf_estimate(res_str) +
+                    video_amf_estimate(res_echo) +
+                    video_amf_estimate(res_caps) +
+                    video_amf_estimate(res_stat);
 
     void *connect_body = video_rtmp_alloc(local, esteem);
     char *ptr = connect_body;
@@ -143,42 +143,98 @@ static void video_rtmp_command_create(video_rtmp_local_t *local, video_list_t *l
     video_amf_value_t *res_null = video_amf_make_null();
     video_amf_value_t *res_num = video_amf_make_number(1.0);
 
-    size_t esteem = video_amf_estimate(res_str)
-                    + video_amf_estimate(res_echo)
-                    + video_amf_estimate(res_null)
-                    + video_amf_estimate(res_num);
+    size_t esteem = video_amf_estimate(res_str) +
+                    video_amf_estimate(res_echo) +
+                    video_amf_estimate(res_null) +
+                    video_amf_estimate(res_num);
 
-    void *connect_body = video_rtmp_alloc(local, esteem);
-    char *ptr = connect_body;
+    void *create_body = video_rtmp_alloc(local, esteem);
+    char *ptr = create_body;
     ptr += video_amf_encode(res_str, ptr);
     ptr += video_amf_encode(res_echo, ptr);
     ptr += video_amf_encode(res_null, ptr);
     ptr += video_amf_encode(res_num, ptr);
 
-    video_rtmp_send(local, 3, 0, VIDEO_RTMP_MSGTYPE_AMF0_CMD, 0, connect_body, esteem);
-    video_slab_unref(connect_body);
+    video_rtmp_send(local, 3, 0, VIDEO_RTMP_MSGTYPE_AMF0_CMD, 0, create_body, esteem);
+    video_slab_unref(create_body);
 
     video_amf_value_free(res_str);
     video_amf_value_free(res_null);
     video_amf_value_free(res_num);
 }
 
+static void video_rtmp_message_onstatus(video_rtmp_local_t *local, uint32_t streamid, char *level, char *code, char *description) {
+    video_amf_value_t *str = video_amf_make_string("onStatus");
+    video_amf_value_t *num = video_amf_make_number(0.0);
+    video_amf_value_t *null = video_amf_make_null();
+    video_amf_value_t *obj = video_amf_make_object();
+    video_map_put(&obj->as.map, "level", video_amf_make_string(level), video_amf_value_free);
+    video_map_put(&obj->as.map, "code", video_amf_make_string(code), video_amf_value_free);
+    video_map_put(&obj->as.map, "description", video_amf_make_string(description), video_amf_value_free);
+    size_t esteem = video_amf_estimate(str) +
+                    video_amf_estimate(num) +
+                    video_amf_estimate(null) +
+                    video_amf_estimate(obj);
+    char *body = video_rtmp_alloc(local, esteem);
+    char *ptr = body;
+    ptr += video_amf_encode(str, ptr);
+    ptr += video_amf_encode(num, ptr);
+    ptr += video_amf_encode(null, ptr);
+    ptr += video_amf_encode(obj, ptr);
+    video_rtmp_send(local, 5, streamid, VIDEO_RTMP_MSGTYPE_AMF0_CMD, 0, body, esteem);
+    video_slab_unref(body);
+    video_amf_value_free(str);
+    video_amf_value_free(num);
+    video_amf_value_free(null);
+    video_amf_value_free(obj);
+}
+
+static int p = 0;
 static void video_rtmp_subscribe(video_message_t *message, void *data) {
     video_rtmp_local_t *local = data;
-    //printf("%d\n", message->time);
+    char begin_body[6] = {0};
+    size_t esteem;
+    char *ptr;
+    //printf("%d %d\n", message->type, message->time);
     switch (message->type) {
         case VIDEO_MESSAGE_TYPE_META:
-            video_rtmp_send(local, 3, 0, VIDEO_RTMP_MSGTYPE_AMF0_META, message->time, message->data, message->len);
+            video_rtmp_send(local, 3, 1, VIDEO_RTMP_MSGTYPE_AMF0_META, message->time, message->data, message->len);
             break;
         case VIDEO_MESSAGE_TYPE_VIDEO:
-            video_rtmp_send(local, 6, 0, VIDEO_RTMP_MSGTYPE_VIDEO, message->time, message->data, message->len);
+            video_rtmp_send(local, 6, 1, VIDEO_RTMP_MSGTYPE_VIDEO, p+=1000/24, message->data, message->len);
             break;
         case VIDEO_MESSAGE_TYPE_AUDIO:
-            video_rtmp_send(local, 8, 0, VIDEO_RTMP_MSGTYPE_AUDIO, message->time, message->data, message->len);
+            video_rtmp_send(local, 4, 1, VIDEO_RTMP_MSGTYPE_AUDIO, message->time, message->data, message->len);
             break;
+        case VIDEO_MESSAGE_TYPE_BEGIN:
+            begin_body[5] = 0x01;
+            video_rtmp_send(local, 2, 0, VIDEO_RTMP_MSGTYPE_USER_CONTROL, 0, begin_body, sizeof(begin_body));
 
+            video_rtmp_message_onstatus(local, 1, "status", "NetStream.Play.Start", "Start playing.");
+
+            video_amf_value_t *rtmpsample_str = video_amf_make_string("|RtmpSampleAccess");
+            video_amf_value_t *rtmpsample_vid = video_amf_make_bool(0x01);
+            video_amf_value_t *rtmpsample_aud = video_amf_make_bool(0x01);
+            esteem = video_amf_estimate(rtmpsample_str) +
+                     video_amf_estimate(rtmpsample_vid) +
+                     video_amf_estimate(rtmpsample_aud);
+            char *rtmpsample_body = video_rtmp_alloc(local, esteem);
+            ptr = rtmpsample_body;
+            ptr += video_amf_encode(rtmpsample_str, ptr);
+            ptr += video_amf_encode(rtmpsample_vid, ptr);
+            ptr += video_amf_encode(rtmpsample_aud, ptr);
+            video_rtmp_send(local, 5, 1, VIDEO_RTMP_MSGTYPE_AMF0_META, 0, rtmpsample_body, esteem);
+            video_slab_unref(rtmpsample_body);
+            video_amf_value_free(rtmpsample_str);
+            video_amf_value_free(rtmpsample_vid);
+            video_amf_value_free(rtmpsample_aud);
+
+            video_rtmp_message_onstatus(local, 1, "status", "NetStream.Play.PublishNotify", "Start publishing.");
+            break;
+        case VIDEO_MESSAGE_TYPE_DONE:
+
+            break;
     }
-    video_slab_unref(message->data);
 }
 
 static void video_rtmp_command_publish(video_rtmp_local_t *local, video_list_t *list) {
@@ -199,33 +255,7 @@ static void video_rtmp_command_publish(video_rtmp_local_t *local, video_list_t *
     local->kind = VIDEO_RTMP_KIND_PUBISHER;
     video_channel_publish(&local->publisher, channel, local->thread);
 
-    video_amf_value_t *res_str = video_amf_make_string("onStatus");
-    video_amf_value_t *res_num = video_amf_make_number(0.0);
-    video_amf_value_t *res_null = video_amf_make_null();
-    video_amf_value_t *res_obj = video_amf_make_object();
-    video_map_put(&res_obj->as.map, "level", video_amf_make_string("status"), video_amf_value_free);
-    video_map_put(&res_obj->as.map, "code", video_amf_make_string("NetStream.Publish.Start"), video_amf_value_free);
-    video_map_put(&res_obj->as.map, "description", video_amf_make_string("Start pubishing."), video_amf_value_free);
-
-    size_t esteem = video_amf_estimate(res_str)
-                    + video_amf_estimate(res_num)
-                    + video_amf_estimate(res_null)
-                    + video_amf_estimate(res_obj);
-
-    void *publish_body = video_rtmp_alloc(local, esteem);
-    char *ptr = publish_body;
-    ptr += video_amf_encode(res_str, ptr);
-    ptr += video_amf_encode(res_num, ptr);
-    ptr += video_amf_encode(res_null, ptr);
-    ptr += video_amf_encode(res_obj, ptr);
-
-    video_rtmp_send(local, 3, 0, VIDEO_RTMP_MSGTYPE_AMF0_CMD, 0, publish_body, esteem);
-
-    video_slab_unref(publish_body);
-    video_amf_value_free(res_str);
-    video_amf_value_free(res_num);
-    video_amf_value_free(res_null);
-    video_amf_value_free(res_obj);
+    video_rtmp_message_onstatus(local, 0, "status", "NetStream.Publish.Start", "Start publishing.");
 }
 
 static void video_rtmp_command_play(video_rtmp_local_t *local, video_list_t *list) {
@@ -234,8 +264,9 @@ static void video_rtmp_command_play(video_rtmp_local_t *local, video_list_t *lis
     char *channelname = value->as.str;
     video_channel_t *channel = video_map_get(channelmap, channelname);
     if (!channel) {
-        video_rtmp_disconnect(local);
-        return;
+        channel = calloc(1, sizeof(video_channel_t));
+        video_channel_init(channel, channelname);
+        video_map_put(channelmap, channelname, channel, (free_cb) video_channel_deinit);
     }
 
     local->kind = VIDEO_RTMP_KIND_SUBSCRIBER;
@@ -250,7 +281,7 @@ static void video_rtmp_message(video_rtmp_local_t *local) {
         case VIDEO_RTMP_MSGTYPE_SET_CHUNK_SIZE:
             memmove(&local->inchunksiz, local->header->msgbodybuf.base, 4);
             video_byte_swap_generic(&local->inchunksiz, 4);
-            printf("[%p] setting chunksize to %d\n", local, local->inchunksiz);
+            //printf("[%p] setting chunksize to %d\n", local, local->inchunksiz);
             break;
         case VIDEO_RTMP_MSGTYPE_AMF0_META:
         case VIDEO_RTMP_MSGTYPE_AMF3_META:
@@ -274,7 +305,7 @@ static void video_rtmp_message(video_rtmp_local_t *local) {
             video_list_init(&list);
             video_amf_decodeall(&list, local->header->msgbodybuf.base, local->header->length);
             video_amf_value_t *value = list.nodes[0].data;
-            printf("[%p] CMD rcvd: %s\n", local, value->as.str);
+            //printf("[%p] CMD rcvd: %s\n", local, value->as.str);
             if (strcmp("connect", value->as.str) == 0) {
                 video_rtmp_command_connect(local, &list);
             } else if (strcmp("createStream", value->as.str) == 0) {

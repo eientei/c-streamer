@@ -72,6 +72,7 @@ void *video_slab_alloc(video_slab_t *slab, size_t size) {
         if (buffer->refcount == 0) {
             buffer->refcount = 1;
             uv_mutex_unlock(&pool->mutex);
+            video_slab_stats(slab, 0);
             return (char*)buffer + sizeof(video_buffer_t);
         }
     }
@@ -82,10 +83,14 @@ void *video_slab_alloc(video_slab_t *slab, size_t size) {
     video_list_add(&pool->buffers, buffer, video_buffer_free);
 
     uv_mutex_unlock(&pool->mutex);
+    video_slab_stats(slab, 0);
     return (char*)buffer + sizeof(video_buffer_t);
 }
 
 void video_slab_ref(void *ptr) {
+    if (ptr == 0) {
+        return;
+    }
     video_buffer_t *buffer = (video_buffer_t *) ((char *) ptr - sizeof(video_buffer_t));
     uv_mutex_lock(&buffer->pool->mutex);
     buffer->refcount++;
@@ -109,8 +114,29 @@ void video_slab_unref(void *ptr) {
     uv_mutex_unlock(&buffer->pool->mutex);
 }
 
+static char *units[] = {
+        "B",
+        "KB",
+        "MB",
+        "GB",
+        "TB"
+};
+
+static size_t video_slab_print_united(double siz) {
+    int i = 0;
+    for (; siz > 1024; i++) {
+        siz /= 1024;
+    }
+
+    return printf("%.2f%s", siz, units[i]);
+}
+
 void video_slab_stats(video_slab_t *slab, char *header) {
-    printf("%s slab stats\n", header);
+    if (header) {
+        printf("%s slab stats\n", header);
+    }
+    size_t inuse = 0;
+    size_t avail = 0;
     for (size_t i = 0; i < slab->pools.size; i++) {
         size_t alloc = 0;
         size_t free = 0;
@@ -118,11 +144,29 @@ void video_slab_stats(video_slab_t *slab, char *header) {
         for (size_t n = 0; n < pool->buffers.size; n++) {
             video_buffer_t *buffer = pool->buffers.nodes[n].data;
             if (buffer->refcount) {
+                inuse += pool->bufsiz;
                 alloc++;
             } else {
                 free++;
             }
+            avail += pool->bufsiz;
         }
-        printf("buffsiz %10ld, size = %ld, free = %ld, acquire = %ld\n", pool->bufsiz, pool->buffers.size, free, alloc);
+        if (header) {
+            printf("buffsiz %10ld, size = %3ld, free = %3ld, acquire = %3ld\n", pool->bufsiz, pool->buffers.size, free, alloc);
+        }
     }
+    if (!header) {
+        printf("\x1b[2K");
+    }
+    size_t shift = 0;
+    shift += printf("Total used ");
+    shift += video_slab_print_united(inuse);
+    shift += printf(" / ");
+    shift += video_slab_print_united(avail);
+    if (header) {
+        printf("\n");
+    } else {
+        printf("\x1b[%ldD", shift);
+    }
+    fflush(stdout);
 };

@@ -12,16 +12,18 @@
 
 typedef enum video_message_type_e video_message_type;
 enum video_message_type_e {
+    VIDEO_MESSAGE_TYPE_BEGIN,
     VIDEO_MESSAGE_TYPE_META,
     VIDEO_MESSAGE_TYPE_VIDEO,
-    VIDEO_MESSAGE_TYPE_AUDIO
+    VIDEO_MESSAGE_TYPE_AUDIO,
+    VIDEO_MESSAGE_TYPE_DONE
 };
 
 typedef struct video_message_s video_message_t;
 struct video_message_s {
     struct video_channel_s *channel;
     video_message_type type;
-    void *data;
+    char *data;
     size_t len;
     uint32_t time;
 };

@@ -56,7 +56,7 @@ void video_make_async(uv_async_t *async, video_async_type type, void *data, free
     video_async->data = data;
     video_async->cb = freedata;
     video_thread_t *thread = async->loop->data;
-    video_queue_enqueue(&thread->queue, video_async);
+    video_queue_enqueue(&thread->queue, video_async, free);
     uv_async_send(async);
 }
 

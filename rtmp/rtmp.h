@@ -14,7 +14,7 @@
 typedef struct video_rtmp_global_s video_rtmp_global_t;
 struct video_rtmp_global_s {
     uv_tcp_t listener;
-
+    uv_timer_t timer;
     video_list_t clients;
 };
 
@@ -72,7 +72,8 @@ enum video_rtmp_state_e {
     VIDEO_RTMP_STATE_S1,
     VIDEO_RTMP_STATE_S2,
     VIDEO_RTMP_STATE_HEADER,
-    VIDEO_RTMP_STATE_BODY
+    VIDEO_RTMP_STATE_BODY,
+    VIDEO_RTMP_STATE_DONE
 };
 
 typedef enum video_rtmp_kind_e video_rtmp_kind;
